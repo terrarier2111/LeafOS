@@ -3,6 +3,7 @@
 #![feature(custom_test_frameworks)]
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
+#![feature(const_mut_refs)]
 
 extern crate alloc;
 
@@ -13,15 +14,25 @@ mod filesystem;
 mod scheduler;
 mod process;
 mod shell;
+pub mod print;
+mod events;
+mod allocators;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::panic::PanicInfo;
+use core::ptr::addr_of;
 use bootloader::{BootInfo, entry_point};
+use lazy_static::lazy_static;
+use spin::Mutex;
 use volatile::Volatile;
 use x86_64::structures::paging::{Page, PageTable, Translate};
 use x86_64::VirtAddr;
-use LeafOS::{allocator, hlt_loop, memory};
+use LeafOS::{hlt_loop, memory};
 use LeafOS::memory::BootInfoFrameAllocator;
+use crate::events::EventHandlers;
+use crate::shell::{Shell, SHELL, TESTVEC};
+use crate::vga_buffer::ColoredString;
 
 // working build command:
 // cargo bootimage --release --target x86_64_target.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem
@@ -39,6 +50,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     // println!("Hello World{}", "!");
     // panic!("test!");
+
+    LeafOS::check_lazy();
+
     LeafOS::init();
 
     println!("Initialization succeeded!");
@@ -49,21 +63,34 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let mut frame_allocator = unsafe {
         BootInfoFrameAllocator::init(&boot_info.memory_map)
     };
-    allocator::init_heap(&mut mapper, &mut frame_allocator)
+    allocators::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
 
     #[cfg(test)]
     test_main();
 
+    shell::TESTVEC.lock().push(0);
+
+    let vec_addr = addr_of!(*TESTVEC);
+    unsafe { shell::TEST2 += 1; }
+    unsafe { println!("{:?}", shell::TEST as *const u64) };
+    unsafe { println!("{:?}", shell::TEST2 as *const u64) };
+    unsafe { println!("main vec: {:?}", vec_addr) };
+    let shell_addr = addr_of!(*SHELL);
+    unsafe { println!("main shell: {:?}", shell_addr) };
+
+    // let shell = Shell::new(ColoredString::from_string(String::from("test: ")));
+    // shell::SHELL.lock().replace(shell);
+    unsafe { shell::TEST += 1; }
+    shell::SHELL.lock()/*.as_ref().unwrap()*/.init();
+    let shell_addr = addr_of!(*SHELL);
+    unsafe { println!("main shell: {:?}", shell_addr) };
+
     println!("Startup succeeded!");
 
-    hlt_loop();
-}
+    LeafOS::init_kb_handler();
 
-fn overflow(mut x: Volatile<u64>) -> u64 {
-    x.write(x.read() + 1);
-    println!("{}", x.read());
-    overflow(x)
+    hlt_loop();
 }
 
 /// This function is called on panic.

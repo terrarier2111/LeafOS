@@ -4,13 +4,21 @@
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![feature(alloc_error_handler)]
+#![feature(const_mut_refs)]
 #![no_std]
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use core::alloc::Layout;
+use core::mem::{transmute, transmute_copy};
 use core::panic::PanicInfo;
+use core::ptr::addr_of;
 use bootloader::{BootInfo, entry_point};
+use lazy_static::lazy_static;
+use pc_keyboard::DecodedKey;
+use spin::Mutex;
+use crate::events::KeyboardEvent;
 
 pub mod interrupts;
 pub mod serial;
@@ -18,13 +26,31 @@ pub mod vga_buffer;
 pub mod driver;
 pub mod gdt;
 pub mod memory;
-pub mod allocator;
+pub mod shell;
+pub mod print;
+pub mod events;
 
 pub fn init() {
     gdt::init();
     interrupts::init_idt();
     unsafe { interrupts::PICS.lock().initialize() };
     x86_64::instructions::interrupts::enable();
+}
+
+pub fn check_lazy() {
+    events::EVENT_HANDLERS.lock().call_keyboard_event(KeyboardEvent {
+        key: DecodedKey::Unicode(char::from(0)),
+    });
+    println!("main events: {:?}", addr_of!(*crate::events::EVENT_HANDLERS));
+}
+
+pub fn init_kb_handler() {
+    events::EVENT_HANDLERS.lock().register_keyboard_handler(Box::new(|event| {
+        println!("keyee: {:?}", event.key);
+    }));
+    let shell_addr = addr_of!(*shell::SHELL);
+    println!("main shell 3: {:?}", shell_addr);
+    println!("main events2: {:?}", addr_of!(*crate::events::EVENT_HANDLERS));
 }
 
 // Testing machinery

@@ -1,3 +1,4 @@
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use volatile::Volatile;
@@ -7,6 +8,7 @@ use core::fmt;
 use x86_64::instructions::interrupts;
 use x86_64::structures::idt::InterruptDescriptorTable;
 use crate::driver::{CharDriverImpl, Driver};
+use crate::println;
 
 lazy_static! {
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
@@ -65,6 +67,16 @@ impl ScreenChar {
         }
     }
 
+    #[inline]
+    pub fn raw_char(&self) -> u8 {
+        self.ascii_character
+    }
+
+    #[inline]
+    pub fn raw_color(&self) -> ColorCode {
+        self.color_code
+    }
+
 }
 
 pub struct ColoredString {
@@ -79,6 +91,17 @@ impl ColoredString {
             chars: vec![],
             curr_color: ColorCode::new(Color::White, Color::Black),
         }
+    }
+
+    pub fn from_string(str: String) -> Self {
+        let mut ret = Self {
+            chars: vec![],
+            curr_color: ColorCode::new(Color::White, Color::Black),
+        };
+        for char in str.bytes() {
+            ret.push_char(char);
+        }
+        ret
     }
 
     pub fn push_char(&mut self, char: u8) {
@@ -97,6 +120,11 @@ impl ColoredString {
     #[inline]
     pub fn color(&mut self, color: ColorCode) {
         self.curr_color = color;
+    }
+
+    #[inline]
+    pub fn chars(&self) -> &Vec<ScreenChar> {
+        &self.chars
     }
 
 }
@@ -124,6 +152,20 @@ impl Writer {
                 // not part of printable ASCII range
                 _ => self.write_byte(0xfe),
             }
+        }
+    }
+
+    pub fn write_colored_string(&mut self, colored: &ColoredString) {
+        for char in &colored.chars {
+            if self.column_position >= BUFFER_WIDTH {
+                self.new_line();
+            }
+
+            let row = BUFFER_HEIGHT - 1;
+            let col = self.column_position;
+
+            self.buffer.chars[row][col].write(*char);
+            self.column_position += 1;
         }
     }
 
@@ -226,15 +268,15 @@ unsafe impl CharDriverImpl<ScreenChar> for Writer {
         const HEIGHT_MASK: usize = {
             let mut start = u8::MAX as usize;
             // keep all bits up to including the 5th - drop the ones thereafter
-            start &= (!(1 << 5));
-            start &= (!(1 << 6));
-            start &= (!(1 << 7));
+            start &= !(1 << 5);
+            start &= !(1 << 6);
+            start &= !(1 << 7);
             start
         };
         const WIDTH_MASK: usize = {
             // keep all bits except the 8th one
             let mut start = u8::MAX as usize;
-            start &= (!(1 << 7));
+            start &= !(1 << 7);
             // shift the bits to their position
             start = start << 8;
             start
@@ -251,27 +293,6 @@ unsafe impl CharDriverImpl<ScreenChar> for Writer {
     unsafe fn read_char_indexed(&mut self, _index: usize) -> ScreenChar {
         unimplemented!()
     }
-}
-
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
-}
-
-#[macro_export]
-macro_rules! println {
-    () => ($crate::print!("\n"));
-    ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
-}
-
-/// Prints the given formatted string to the VGA text buffer
-/// through the global `WRITER` instance.
-#[doc(hidden)]
-pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    interrupts::without_interrupts(|| {
-        WRITER.lock().write_fmt(args).unwrap();
-    });
 }
 
 #[test_case]
