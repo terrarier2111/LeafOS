@@ -19,16 +19,11 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    /*interrupts::without_interrupts(|| {
+    interrupts::without_interrupts(|| {
         if has_shell() {
             SHELL.lock().write_fmt(args);
         } else {
             WRITER.lock().write_fmt(args);
         }
-    });*/
-    if has_shell() {
-        SHELL.lock().write_fmt(args);
-    } else {
-        WRITER.lock().write_fmt(args);
-    }
+    });
 }

@@ -19,16 +19,18 @@ use lazy_static::lazy_static;
 use pc_keyboard::DecodedKey;
 use spin::Mutex;
 use crate::events::KeyboardEvent;
+use crate::shell::{has_shell, SHELL};
 
+pub mod vga_buffer;
 pub mod interrupts;
 pub mod serial;
-pub mod vga_buffer;
 pub mod driver;
 pub mod gdt;
 pub mod memory;
-pub mod shell;
 pub mod print;
 pub mod events;
+pub mod shell;
+pub(crate) mod allocators;
 
 pub fn init() {
     gdt::init();
@@ -37,20 +39,13 @@ pub fn init() {
     x86_64::instructions::interrupts::enable();
 }
 
-pub fn check_lazy() {
-    events::EVENT_HANDLERS.lock().call_keyboard_event(KeyboardEvent {
-        key: DecodedKey::Unicode(char::from(0)),
-    });
-    println!("main events: {:?}", addr_of!(*crate::events::EVENT_HANDLERS));
-}
-
 pub fn init_kb_handler() {
     events::EVENT_HANDLERS.lock().register_keyboard_handler(Box::new(|event| {
-        println!("keyee: {:?}", event.key);
+        // println!("keyee: {:?}", event.key);
+        if has_shell() {
+            SHELL.lock().key_event(event.key.clone());
+        }
     }));
-    let shell_addr = addr_of!(*shell::SHELL);
-    println!("main shell 3: {:?}", shell_addr);
-    println!("main events2: {:?}", addr_of!(*crate::events::EVENT_HANDLERS));
 }
 
 // Testing machinery

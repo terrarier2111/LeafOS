@@ -1,6 +1,7 @@
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use x86_64::{PhysAddr, structures::paging::PageTable, VirtAddr};
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PhysFrame, Size4KiB};
+use crate::memory;
 
 // The bigger the number of a page table, the larger the memory region (level 4 contains multiple level 3 etc.)
 // Virtual memory blocks: pages
@@ -90,4 +91,16 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         self.next += 1;
         frame
     }
+}
+
+pub fn setup(memory_map: &'static MemoryMap, physical_memory_offset: u64) -> (OffsetPageTable, BootInfoFrameAllocator) {
+    let phys_mem_offset = VirtAddr::new(physical_memory_offset);
+    // initialize a mapper
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe {
+        BootInfoFrameAllocator::init(memory_map)
+    };
+    crate::allocators::init_heap(&mut mapper, &mut frame_allocator)
+        .expect("heap initialization failed");
+    (mapper, frame_allocator)
 }

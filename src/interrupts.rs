@@ -7,7 +7,7 @@ use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
 use crate::{gdt, hlt_loop, print, println, shell};
 use crate::events::KeyboardEvent;
-use crate::shell::{has_shell, SHELL, TESTVEC};
+use crate::shell::{has_shell, SHELL};
 
 // interrupts
 
@@ -113,32 +113,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
     let scancode: u8 = unsafe { port.read() };
     if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
         if let Some(key) = keyboard.process_keyevent(key_event) {
-            /*match key {
-                DecodedKey::Unicode(character) => print!("{}", character),
-                DecodedKey::RawKey(key) => print!("{:?}", key),
-            }*/
             crate::events::EVENT_HANDLERS.lock().call_keyboard_event(KeyboardEvent {
                 key,
             });
-            let shell = has_shell();
-            println!("has shell: {}", shell);
-            println!("{:?}", _stack_frame);
-            unsafe { println!("{:?}", shell::TEST as *const u64) };
-            unsafe { println!("{:?}", shell::TEST2 as *const u64) };
-            unsafe { println!("kb {:?}", addr_of!(*KEYBOARD)) };
-            let shell_addr = addr_of!(*SHELL);
-            unsafe { println!("shell {:?}", shell_addr) };
-            unsafe { println!("events {:?}", addr_of!(*crate::events::EVENT_HANDLERS)) };
-            unsafe { println!("vec: {:?}", addr_of!(*TESTVEC)) };
-            if has_shell() {
-                println!("key event!");
-                crate::shell::SHELL.lock().key_event(key);
-            } else {
-                match key {
-                    DecodedKey::Unicode(character) => println!("uni {}", character),
-                    DecodedKey::RawKey(key) => println!("{:?}", key),
-                }
-            }
         }
     }
     // This notifies the cpu that the interrupt was processed and that it can send the next one as soon as it's ready/triggered

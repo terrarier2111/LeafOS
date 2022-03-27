@@ -7,16 +7,10 @@
 
 extern crate alloc;
 
-mod vga_buffer;
 mod serial;
-pub mod driver;
 mod filesystem;
 mod scheduler;
 mod process;
-mod shell;
-pub mod print;
-mod events;
-mod allocators;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -28,11 +22,10 @@ use spin::Mutex;
 use volatile::Volatile;
 use x86_64::structures::paging::{Page, PageTable, Translate};
 use x86_64::VirtAddr;
-use LeafOS::{hlt_loop, memory};
+use LeafOS::{hlt_loop, memory, println, shell};
 use LeafOS::memory::BootInfoFrameAllocator;
-use crate::events::EventHandlers;
-use crate::shell::{Shell, SHELL, TESTVEC};
-use crate::vga_buffer::ColoredString;
+use crate::shell::{Shell, SHELL};
+use LeafOS::vga_buffer::ColoredString;
 
 // working build command:
 // cargo bootimage --release --target x86_64_target.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem
@@ -51,42 +44,31 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // println!("Hello World{}", "!");
     // panic!("test!");
 
-    LeafOS::check_lazy();
+    // LeafOS::check_lazy();
 
     LeafOS::init();
 
     println!("Initialization succeeded!");
 
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    // initialize a mapper
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(&boot_info.memory_map)
-    };
-    allocators::init_heap(&mut mapper, &mut frame_allocator)
-        .expect("heap initialization failed");
+    let (table, allocator) = memory::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
 
     #[cfg(test)]
     test_main();
 
-    shell::TESTVEC.lock().push(0);
+    // LeafOS::check_lazy();
+    // println!("events main: {:?}", addr_of!(*events::EVENT_HANDLERS));
 
-    let vec_addr = addr_of!(*TESTVEC);
-    unsafe { shell::TEST2 += 1; }
-    unsafe { println!("{:?}", shell::TEST as *const u64) };
-    unsafe { println!("{:?}", shell::TEST2 as *const u64) };
-    unsafe { println!("main vec: {:?}", vec_addr) };
     let shell_addr = addr_of!(*SHELL);
     unsafe { println!("main shell: {:?}", shell_addr) };
 
     // let shell = Shell::new(ColoredString::from_string(String::from("test: ")));
     // shell::SHELL.lock().replace(shell);
-    unsafe { shell::TEST += 1; }
-    shell::SHELL.lock()/*.as_ref().unwrap()*/.init();
+
     let shell_addr = addr_of!(*SHELL);
     unsafe { println!("main shell: {:?}", shell_addr) };
 
     println!("Startup succeeded!");
+    LeafOS::shell::SHELL.lock().init();
 
     LeafOS::init_kb_handler();
 

@@ -1,29 +1,23 @@
 use alloc::{format, vec};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::{fmt, ptr};
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::{DecodedKey, KeyCode};
-use spin::Mutex;
+use spin::{Mutex, MutexGuard};
 use x86_64::instructions::interrupts;
-use crate::vga_buffer::ColoredString;
+use crate::println;
+use crate::vga_buffer::{ColoredString, Writer, WRITER};
 
 lazy_static! {
-    pub static ref TESTVEC: Mutex<Vec<u8>> = Mutex::new(vec![]);
     pub static ref SHELL: Mutex<Shell> = Mutex::new(Shell::new(ColoredString::from_string(String::from("Test: "))));
+    pub static ref INITIALIZED: AtomicBool = AtomicBool::new(false);
 }
 
-pub static mut TEST: u64 = 0;
-pub static mut TEST2: u64 = 0;
-
 pub fn has_shell() -> bool {
-    // let shell = SHELL.lock();
-    // shell.is_some()
-    // SHELL.lock().is_init()
-    let tmp = unsafe { TEST };
-    tmp == 1
+    INITIALIZED.load(Ordering::Acquire)
 }
 
 // Mutex::new(Shell::new(ColoredString::from_string(String::from("Test: "))));
@@ -31,23 +25,17 @@ pub fn has_shell() -> bool {
 pub struct Shell {
     prompt: ColoredString,
     written_char_count: usize,
-    init: bool,
+    prompt_enabled: bool,
 }
 
 impl Shell {
-
-    // Uses vga_buffer char driver to check for empty current line in vga_buffer
 
     pub fn new(prompt: ColoredString) -> Self {
         Self {
             prompt,
             written_char_count: 0,
-            init: true
+            prompt_enabled: true,
         }
-    }
-
-    pub fn is_init(&self) -> bool {
-        self.init
     }
 
     pub fn init(&mut self) {
@@ -56,7 +44,7 @@ impl Shell {
             writer.new_line();
         }
         writer.write_colored_string(&self.prompt);
-        self.init = true;
+        INITIALIZED.store(true, Ordering::Release);
     }
 
     pub fn write_colored(&mut self, text: &ColoredString) {
@@ -76,14 +64,24 @@ impl Shell {
         }
     }
 
+    fn print_prompt(&self, writer: &mut MutexGuard<Writer>) {
+        if self.prompt_enabled {
+            writer.write_colored_string(&self.prompt);
+        }
+    }
+
+    fn newline(&mut self, writer: &mut MutexGuard<Writer>) {
+        writer.new_line();
+        self.print_prompt(writer);
+        self.written_char_count = 0;
+    }
+
     pub fn write(&mut self, text: &str) {
         let mut writer = crate::vga_buffer::WRITER.lock();
         for char in text.bytes() {
             match char {
                 b'\n' => {
-                    writer.new_line();
-                    writer.write_colored_string(&self.prompt);
-                    self.written_char_count = 0;
+                    self.newline(&mut writer);
                 },
                 // printable ASCII byte or newline
                 0x20..=0x7e => writer.write_byte(char),
@@ -118,28 +116,39 @@ impl Shell {
                 }
             },
             DecodedKey::Unicode(key) => {
-                if key == char::MAX { // FIXME: Fix this!
-                    if self.written_char_count < 0 {
+                const BACKSPACE: char = 8 as char;
+                if key == BACKSPACE {
+                    if self.written_char_count > 0 {
                         let mut writer = crate::vga_buffer::WRITER.lock();
                         if writer.get_column_position() > 0 {
                             let pos = writer.get_column_position();
                             writer.set_column_position(pos - 1);
-                            writer.write_byte(b' ');
-                            let pos = writer.get_column_position();
-                            writer.set_column_position(pos - 1);
+                        } else {
+                            writer.old_line();
+                            writer.set_column_position(crate::vga_buffer::BUFFER_WIDTH - 1);
                         }
+                        writer.set_byte(b' ');
                         self.written_char_count -= 1;
                     }
                 } else {
                     // FIXME: Only print a-Z, 0-9
+                    const ENTER: char = 10 as char;
+
                     let mut writer = crate::vga_buffer::WRITER.lock();
-                    interrupts::without_interrupts(|| {
-                        writer.write_fmt(format_args!("{}", key as u32));
-                    });
-                    self.written_char_count += 1;
+                    if key == ENTER {
+                        self.newline(&mut writer);
+                    } else {
+                        writer.write_fmt(format_args!("{}", key));
+                        self.written_char_count += 1;
+                    }
+
                 }
             }
         }
+    }
+
+    pub fn set_enable_prompt(&mut self, enabled: bool) {
+        self.prompt_enabled = enabled;
     }
 
 }

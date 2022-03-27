@@ -130,7 +130,7 @@ impl ColoredString {
 }
 
 const BUFFER_HEIGHT: usize = 25;
-const BUFFER_WIDTH: usize = 80;
+pub const BUFFER_WIDTH: usize = 80;
 
 #[repr(transparent)]
 struct Buffer {
@@ -174,8 +174,21 @@ impl Writer {
     }
 
     pub fn write_byte_colored(&mut self, char: u8, color: ColorCode) {
+        if !self.set_byte_colored(char, color) {
+            self.column_position += 1;
+        }
+    }
+
+    pub fn set_byte(&mut self, char: u8) {
+        self.set_byte_colored(char, self.color_code);
+    }
+
+    pub fn set_byte_colored(&mut self, char: u8, color: ColorCode) -> bool {
         match char {
-            b'\n' => self.new_line(),
+            b'\n' => {
+                self.new_line();
+                true
+            },
             char => {
                 if self.column_position >= BUFFER_WIDTH {
                     self.new_line();
@@ -188,7 +201,7 @@ impl Writer {
                     ascii_character: char,
                     color_code: color,
                 });
-                self.column_position += 1;
+                false
             }
         }
     }
@@ -201,6 +214,17 @@ impl Writer {
             }
         }
         self.clear_row(BUFFER_HEIGHT - 1);
+        self.column_position = 0;
+    }
+
+    pub fn old_line(&mut self) {
+        for row in (0..(BUFFER_HEIGHT - 1)).rev() {
+            for col in 0..BUFFER_WIDTH {
+                let character = self.buffer.chars[row][col].read();
+                self.buffer.chars[row + 1][col].write(character);
+            }
+        }
+        self.clear_row(0);
         self.column_position = 0;
     }
 
