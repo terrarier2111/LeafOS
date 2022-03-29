@@ -31,6 +31,7 @@ pub mod print;
 pub mod events;
 pub mod shell;
 pub(crate) mod allocators;
+mod apic;
 
 pub fn init() {
     gdt::init();

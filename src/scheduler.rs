@@ -1,18 +1,17 @@
 use alloc::vec::Vec;
+use x86_64::registers::control::Cr3Flags;
+use x86_64::structures::paging::PhysFrame;
 use crate::process::Process;
 
-pub struct Scheduler {
+pub trait Scheduler {
+
+    fn run(&mut self);
+
+}
+
+struct RoundRobinScheduler {
     tasks: Vec<(Process, ProcessState)>,
 }
-
-impl Scheduler {
-
-    pub fn run(&mut self) {
-
-    }
-
-}
-
 
 // This process state should be saved onto the kernel stack when we enter kernel mode so we don't have
 // to care about this when context switching
@@ -38,4 +37,19 @@ struct ProcessState {
     rip: u64, // instruction pointer (aka. program counter)
     // FIXME: Add segmentation tables
     // FIXME: Add page tables
+    cr3: Option<(PhysFrame, Cr3Flags)>,
+}
+
+struct SchedulerEntry {
+    process: Process,
+    state: ProcessState,
+    balance: u64,
+}
+
+impl SchedulerEntry {
+
+    fn is_kernel_owned(&self) -> bool {
+        self.state.cr3.is_none()
+    }
+
 }
