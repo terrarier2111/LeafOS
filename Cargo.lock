@@ -6,6 +6,7 @@ version = 3
 name = "LeafOS"
 version = "0.1.0"
 dependencies = [
+ "bit_field",
  "bootloader",
  "lazy_static",
  "linked_list_allocator",

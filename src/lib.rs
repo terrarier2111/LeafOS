@@ -6,6 +6,9 @@
 #![feature(alloc_error_handler)]
 #![feature(const_mut_refs)]
 #![no_std]
+#![feature(stdsimd)]
+#![feature(step_trait)]
+#![feature(adt_const_params)] // used for checking for presence of cpuid instruction
 
 extern crate alloc;
 
@@ -24,14 +27,15 @@ use crate::shell::{has_shell, SHELL};
 pub mod vga_buffer;
 pub mod interrupts;
 pub mod serial;
-pub mod driver;
 pub mod gdt;
 pub mod memory;
 pub mod print;
 pub mod events;
 pub mod shell;
 pub(crate) mod allocators;
-mod apic;
+mod ring_buffer;
+mod cpuid;
+mod drivers;
 
 pub fn init() {
     gdt::init();

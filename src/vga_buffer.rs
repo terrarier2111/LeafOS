@@ -7,7 +7,7 @@ use spin::Mutex;
 use core::fmt;
 use x86_64::instructions::interrupts;
 use x86_64::structures::idt::InterruptDescriptorTable;
-use crate::driver::{CharDriverImpl, Driver};
+use crate::drivers::driver::{CharDriverImpl, Driver};
 use crate::println;
 
 lazy_static! {
