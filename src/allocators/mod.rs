@@ -1,3 +1,4 @@
+use linked_list_allocator::LockedHeap;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
 use x86_64::structures::paging::mapper::MapToError;
 use x86_64::VirtAddr;
@@ -5,9 +6,11 @@ use crate::allocators::fixed_size_block::FixedSizeBlockAllocator;
 
 mod fixed_size_block;
 
+/*
 #[global_allocator]
 static ALLOCATOR: Locked<FixedSizeBlockAllocator> = Locked::new(
     FixedSizeBlockAllocator::new());
+*/
 
 /// A wrapper around spin::Mutex to permit trait implementations.
 pub struct Locked<A> {
@@ -26,8 +29,12 @@ impl<A> Locked<A> {
     }
 }
 
+#[global_allocator]
+static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
 pub const HEAP_START: usize = 0x_4444_4444_0000;
-pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
+// pub const HEAP_SIZE: usize = 100 * 1024; // 100 KiB
+pub const HEAP_SIZE: usize = 1000 * 1024; // 1000 KiB
 
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,

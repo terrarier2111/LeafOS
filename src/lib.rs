@@ -1,4 +1,3 @@
-#![feature(abi_x86_interrupt)]
 #![feature(custom_test_frameworks)]
 #![cfg_attr(test, no_main)]
 #![test_runner(crate::test_runner)]
@@ -8,7 +7,10 @@
 #![no_std]
 #![feature(stdsimd)]
 #![feature(step_trait)]
-#![feature(adt_const_params)] // used for checking for presence of cpuid instruction
+#![feature(adt_const_params)]
+#![feature(strict_provenance)]
+#![feature(naked_functions)]
+#![feature(abi_x86_interrupt)] // used for checking for presence of cpuid instruction
 
 extern crate alloc;
 
@@ -33,13 +35,16 @@ pub mod print;
 pub mod events;
 pub mod shell;
 pub(crate) mod allocators;
-mod ring_buffer;
 mod cpuid;
-mod drivers;
+pub mod drivers;
+pub mod data_structures;
+pub mod scheduler;
+pub mod process;
+pub mod filesystem;
 
 pub fn init() {
     gdt::init();
-    interrupts::init_idt();
+    interrupts::init();
     unsafe { interrupts::PICS.lock().initialize() };
     x86_64::instructions::interrupts::enable();
 }

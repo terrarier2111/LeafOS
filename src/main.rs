@@ -8,9 +8,6 @@
 extern crate alloc;
 
 mod serial;
-mod filesystem;
-mod scheduler;
-mod process;
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -20,59 +17,66 @@ use bootloader::{BootInfo, entry_point};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
-use x86_64::structures::paging::{Page, PageTable, Translate};
+use x2apic::lapic::TimerMode;
+use x86_64::structures::paging::{FrameAllocator, Page, PageTable, Translate};
 use x86_64::VirtAddr;
-use LeafOS::{hlt_loop, memory, println, shell};
+use LeafOS::{hlt_loop, memory, println, scheduler, shell};
+use LeafOS::drivers::pit;
+use LeafOS::interrupts::init_apic;
 use LeafOS::memory::BootInfoFrameAllocator;
+use LeafOS::scheduler::SCHEDULER_TIMER_DELAY;
 use crate::shell::{Shell, SHELL};
 use LeafOS::vga_buffer::ColoredString;
 
 // working build command:
 // cargo bootimage --release --target x86_64_target.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem
-// qemu-system-x86_64 -drive format=raw,file=target/x86_64_target/release/bootimage-LeafOS.bin
-
-// issue: https://github.com/phil-opp/blog_os/discussions/998#discussioncomment-861868
-// https://github.com/phil-opp/blog_os/discussions/998#discussioncomment-861968
+// qemu-system-x86_64 -d int -D ./qemu_logs -no-reboot -M smm=off -drive format=raw,file=target/x86_64_target/release/bootimage-LeafOS.bin
 
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    // we disable interrupts for the start so no unexpected shinanigans can occour
+    // x86_64::instructions::interrupts::disable();
     // this function is the entry point, since the linker looks for a function
     // named `_start` by default
     println!("Initializing...");
-
-    // println!("Hello World{}", "!");
-    // panic!("test!");
-
-    // LeafOS::check_lazy();
 
     LeafOS::init();
 
     println!("Initialization succeeded!");
 
     let (table, allocator) = memory::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
+    scheduler::init();
+    unsafe { init_apic(boot_info.physical_memory_offset); }
+    pit::init();
+    LeafOS::interrupts::start_timer_one_shot(SCHEDULER_TIMER_DELAY);
+
+    scheduler::start_proc(test_fn, true);
+    scheduler::start_proc(test_fn_hello, true);
 
     #[cfg(test)]
     test_main();
-
-    // LeafOS::check_lazy();
-    // println!("events main: {:?}", addr_of!(*events::EVENT_HANDLERS));
-
-    let shell_addr = addr_of!(*SHELL);
-    unsafe { println!("main shell: {:?}", shell_addr) };
-
-    // let shell = Shell::new(ColoredString::from_string(String::from("test: ")));
-    // shell::SHELL.lock().replace(shell);
-
-    let shell_addr = addr_of!(*SHELL);
-    unsafe { println!("main shell: {:?}", shell_addr) };
 
     println!("Startup succeeded!");
     LeafOS::shell::SHELL.lock().init();
 
     LeafOS::init_kb_handler();
 
+    // x86_64::instructions::interrupts::enable();
+
     hlt_loop();
+}
+
+fn test_fn() {
+    loop {
+        println!("test1");
+    }
+}
+
+fn test_fn_hello() {
+    loop {
+        println!("HELLO");
+    }
 }
 
 /// This function is called on panic.
@@ -137,5 +141,3 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
         port.write(exit_code as u32);
     }
 }
-
-// https://os.phil-opp.com/minimal-rust-kernel/#target-specification

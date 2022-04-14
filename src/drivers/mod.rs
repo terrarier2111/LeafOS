@@ -1,4 +1,3 @@
-mod apic;
-mod pic;
-mod pit;
+pub mod pic;
+pub mod pit;
 pub mod driver;

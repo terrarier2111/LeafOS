@@ -34,10 +34,12 @@ test-timeout = 300                  # (in seconds)
 bootloader = { version = "0.9.22", features = ["map_physical_memory"] }
 volatile = "0.2.7"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
-spin = "0.5.2"
+spin = "0.7.1"
 x86_64 = "0.14.8"
 uart_16550 = "0.2.16" # used to send stuff over qemu to the host computer
 pic8259 = "0.10.2"
 pc-keyboard = "0.5.1"
 linked_list_allocator = "0.9.1"
-bit_field = "0.10.1"
+# bit_field = "0.10.1"
+x2apic = "0.4.0"
+raw-cpuid = "10.3.0"
