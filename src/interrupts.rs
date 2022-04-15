@@ -1,24 +1,17 @@
-use core::arch::{asm, global_asm};
-use core::mem::transmute;
-use core::ops::{Index, IndexMut};
-use core::ptr::addr_of;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::arch::asm;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
-use pc_keyboard::{DecodedKey, HandleControl, Keyboard, layouts, ScancodeSet1};
+use pc_keyboard::{HandleControl, Keyboard, layouts, ScancodeSet1};
 use pic8259::ChainedPics;
-use spin::{Mutex, Once};
+use spin::Mutex;
 use x2apic::lapic::{LocalApic, LocalApicBuilder, TimerDivide, TimerMode, xapic_base};
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::structures::paging::{OffsetPageTable, Translate};
-use x86_64::structures::paging::mapper::TranslateResult;
-use x86_64::VirtAddr;
-use crate::{gdt, hlt_loop, print, println, scheduler, shell};
+use crate::{gdt, hlt_loop, println};
 use crate::drivers::{pic, pit};
 use crate::drivers::pit::PIT_DIVIDEND;
 use crate::events::KeyboardEvent;
 use crate::scheduler::SCHEDULER_TIMER_DELAY;
-use crate::shell::{has_shell, SHELL};
 
 static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
 
@@ -46,10 +39,10 @@ pub fn init() {
         IDT.debug.set_handler_fn(debug_handler);
         IDT.invalid_tss.set_handler_fn(invalid_tss_handler);
         IDT.page_fault.set_handler_fn(page_fault_handler);
-        unsafe {
-            IDT.double_fault.set_handler_fn(double_fault_handler)
-                .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
-        }
+
+        IDT.double_fault.set_handler_fn(double_fault_handler)
+            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+
         IDT[InterruptIndex::Timer.as_usize()]
             .set_handler_fn(timer_interrupt_handler);
         IDT[InterruptIndex::Keyboard.as_usize()]
@@ -62,7 +55,7 @@ pub fn init() {
 }
 
 pub unsafe fn init_apic(physical_memory_offset: u64) {
-    const TIMER_DELAY: u16 = u16::MAX/*255*//*5000*/;
+    const TIMER_DELAY: u16 = u16::MAX;
     let apic_physical_address: u64 = xapic_base();
     let apic_virtual_address = physical_memory_offset + apic_physical_address;
     let lapic = LocalApicBuilder::new()
@@ -311,165 +304,6 @@ pub extern "x86-interrupt" fn apic_timer_handler(_interrupt_stack_frame: Interru
         options(noreturn));
     }
 }
-
-/*
-global_asm!(r#"
-.globl apic_timer_handler
-apic_timer_handler:
-	push rax
-	push rbx
-	push rcx
-	push rdx
-	push rsi
-	push rdi
-	push r8
-	push r9
-	push r10
-	push r11
-	push r12
-	push r13
-	push r14
-	push r15
-	push rbp
-
-    call restart_apic # restarts the apic timer
-
-    call current_task_ptr
-    mov [rax], rsp
-
-    call select_next_task # moves a pointer to the next task in rax (64 bit rsp field, 64 bit rsp_top field)
-
-    mov rsp, [rax] # switch to new task's stack
-    mov rbx, [rax + 8] # store stack top
-
-    push rbx
-    call tss_ptr # a get a pointer to the TSS
-    pop rbx
-
-    mov [rax + 4], rbx # set the privilege level 0 stack to the a pointer to the top of the new task's stack
-
-    mov ax, (0 * 8) | 0 # ring 0 data segment
-	mov ds, ax
-	mov es, ax
-	mov fs, ax
-	mov gs, ax # SS is handled by iretq
-
-	pop rbp
-	pop r15
-	pop r14
-	pop r13
-	pop r12
-	pop r11
-	pop r10
-	pop r9
-	pop r8
-	pop rdi
-	pop rsi
-	pop rdx
-	pop rcx
-	pop rbx
-	pop rax
-	iretq
-	"#);*/
-
-/*
-extern "x86-interrupt" fn apic_timer_handler(
-    _stack_frame: InterruptStackFrame)
-{
-    unsafe { LAPIC.as_mut().unwrap().end_of_interrupt(); }
-    // https://github.com/rust-lang/rust/issues/40180
-
-
-    start_timer_one_shot(SCHEDULER_TIMER_DELAY);
-    // println!("apic timer!\n{:?}", _stack_frame);
-    // while true {}
-    // scheduler::run();
-    unsafe {
-        // asm!("push rax");
-
-        asm!("push rbx");
-        asm!(
-    // Save registers
-    /*"push rax",
-    "push rbx",
-    "push rcx",
-    "push rdx",
-    "push rsi",
-    "push rdi",
-    "push r8",
-    "push r9",
-    "push r10",
-    "push r11",
-    "push r12",
-    "push r13",
-    "push r14",
-    "push r15",*/
-    // save cr3
-    /*"mov rcx, cr3", // FIXME: Support virtual address spaces!
-    "push rcx",*/
-    "push rbp",
-
-    "call current_task_ptr",
-    "mov [rax], rsp", // save current task's stack pointer
-
-    // prepare next task
-    "call select_next_task", // next task goes into rax
-        "mov rsp, [rax]", // load stack pointer
-        "mov rbx, [rax + 8]", // get the top of the stack
-        // "push rbx", // FIXME: Do we even need this?
-        "call tss_ptr",
-        // "pop rbx", // FIXME: Do we even need this?
-        "mov [rax + 4], rbx", // update tss kernel stack to point to the top of the new task's stack
-
-    // "cmp rax, rcx", // FIXME: Support virtual address spaces!
-    // FIXME: Move the page table of the new process's virtual address space
-
-
-    // "2: jmp 2b", // FIXME: Is this correct?
-
-
-    "pop rbp",
-    // load cr3
-    /*"pop rax", // FIXME: Support virtual address spaces!
-    "mov cr3, rax",*/
-    // load other registers
-    /*"pop r15",
-    "pop r14",
-    "pop r13",
-    "pop r12",
-    "pop r11",
-    "pop r10",
-    "pop r9",
-    "pop r8",
-    "pop rdi",
-    "pop rsi",
-    "pop rdx",
-    "pop rcx",
-    "pop rbx",
-    "pop rax",*/
-    // FIXME: Add in/out
-    // inout("rax") _ => _,
-    out("rax") _,
-    // out("rbx") _,
-    out("rcx") _,
-    out("rdx") _,
-        out("rsi") _,
-        out("rdi") _,
-        out("r8") _,
-        out("r9") _,
-        out("r10") _,
-        out("r11") _,
-        out("r12") _,
-        out("r13") _,
-        out("r14") _,
-        out("r15") _,
-    );
-        // asm!("pop rax");
-        asm!("pop rbx");
-
-        asm!("iret");
-    }
-}*/
 
 extern "x86-interrupt" fn apic_error_handler(
     _stack_frame: InterruptStackFrame)

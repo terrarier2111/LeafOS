@@ -1,10 +1,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
-use raw_cpuid::CpuId;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::port::Port;
-use x86_64::structures::idt::InterruptStackFrame;
-use crate::cpuid::has_cpuid;
 use crate::drivers::pit::Channel::Channel0;
 
 const CHANNEL0: u16 = 0x40; // RW
@@ -102,97 +99,6 @@ pub fn init() {
     set_frequency(PIT_FREQUENCY_HZ);
 }
 
-/*
-struct TimerInitResult {
-    frequency: u32,
-    fractions: u32,
-    ms: u32,
-}
-
-// reload value e.g: 0x10000
-unsafe fn got_reload_value(value: u32) -> TimerInitResult {
-    // let result = 3579545 / value;
-    /*
-    let result;
-    let remainder;
-    asm!("mov eax,3579545",
-    "mov edx,0",                         // edx:eax = 3579545
-    "div ebx",                           // eax = 3579545 / reload_value, edx = remainder
-    // "cmp edx,3579545 / 2",               // Is the remainder more than half?
-    out("eax") result,
-    inout("ebx") value,
-    out("edx") remainder,
-    );
-    if remainder > 3579545 / 2 {
-        result += 1;
-    }
-    asm!("mov ebx,3",
-    "mov edx,0",                         // edx:eax = 3579545 * 256 / frequency
-    "div ebx",                           // eax = (3579545 * 256 / 3 * 256) / frequency
-    // "cmp edx,3 / 2",                      // Is the remainder more than half?"
-    inout("eax") result,
-    out("ebx") value,
-    out("edx") _,
-    );
-    if value > 3 / 2 {
-
-    }*/
-    let mut irq0_frequency = 3579545 / value;
-    if (3579545 % value) > (3579545 / 2) { // FIXME: check direction
-        irq0_frequency += 1;
-    }
-    let carry = if (irq0_frequency % 3) > (3 / 2) { // FIXME: check direction
-        1
-    } else {
-        0
-    };
-    irq0_frequency /= 3;
-    irq0_frequency += carry;
-    // we got the IRQ0 frequency
-
-    // let mut tmp = 0xDBB3A062 * value;
-    let irq0_fractions: u32;
-    let irq0_ms: u32;
-    asm!(
-    "mov eax, 0xDBB3A062", // magic value comes from: 3000 * (2^42) / 3579545
-    "mul {}",
-    "shrd eax, edx, 10",
-    "shr edx, 10",
-    in(reg) value,
-    out("eax") irq0_fractions,
-    out("edx") irq0_ms,
-    );
-
-    without_interrupts(|| {
-        write_mode(Channel0, AccessMode::LoHiByte, OperatingMode::RateGenerator, DataMode::Binary);
-    });
-    set_pit_count(value as u16);
-    TimerInitResult {
-        frequency: irq0_frequency,
-        fractions: irq0_fractions,
-        ms: irq0_ms,
-    }
-}
-
-unsafe fn init_pit(pit_freq: u32) -> TimerInitResult {
-    if pit_freq <= 18 { // FIXME: check direction | jbe
-        return got_reload_value(0x10000);
-    }
-    if pit_freq >= 1193181 { // FIXME: check direction | jae
-        return got_reload_value(pit_freq);
-    }
-    let mut value = 3579545 / pit_freq;
-    if 3579545 % pit_freq <= 3579545 / 2 { // FIXME: check direction | (inverse) jb
-        value += 1;
-    }
-    let remainder = value % 3;
-    value /= 3;
-    if remainder > 3 / 2 { // FIXME: check direction | jb
-        value += 1;
-    }
-    got_reload_value(value)
-}*/
-
 const PIT_FREQUENCY_HZ: usize = 1000;
 pub const PIT_DIVIDEND: usize = 1193182;
 
@@ -239,9 +145,6 @@ unsafe fn sleep(millis: u64) {
 }
 
 pub fn handle_timer() {
-    // if has_shell() {
-    // println!(".");
-    // }
     let curr = COUNTDOWN.load(Ordering::SeqCst);
     if curr != 0 {
         COUNTDOWN.store(curr - 1, Ordering::SeqCst);

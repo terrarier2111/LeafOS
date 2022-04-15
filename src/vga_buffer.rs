@@ -5,7 +5,6 @@ use volatile::Volatile;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use core::fmt;
-use x86_64::instructions::interrupts;
 use x86_64::structures::idt::InterruptDescriptorTable;
 use crate::drivers::driver::{CharDriverImpl, Driver};
 use crate::println;

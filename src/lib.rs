@@ -7,7 +7,6 @@
 #![no_std]
 #![feature(stdsimd)]
 #![feature(step_trait)]
-#![feature(adt_const_params)]
 #![feature(strict_provenance)]
 #![feature(naked_functions)]
 #![feature(abi_x86_interrupt)] // used for checking for presence of cpuid instruction
@@ -16,14 +15,8 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::alloc::Layout;
-use core::mem::{transmute, transmute_copy};
 use core::panic::PanicInfo;
-use core::ptr::addr_of;
 use bootloader::{BootInfo, entry_point};
-use lazy_static::lazy_static;
-use pc_keyboard::DecodedKey;
-use spin::Mutex;
-use crate::events::KeyboardEvent;
 use crate::shell::{has_shell, SHELL};
 
 pub mod vga_buffer;

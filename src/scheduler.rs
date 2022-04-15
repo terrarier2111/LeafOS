@@ -4,16 +4,11 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::arch::asm;
 use core::mem::size_of;
-use core::pin::Pin;
 use core::ptr;
-use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
-use spin::{Mutex, MutexGuard, Once};
-use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::structures::paging::PhysFrame;
+use spin::{Mutex, Once};
 use x86_64::VirtAddr;
 use crate::println;
 
@@ -80,7 +75,6 @@ impl Scheduler for RoundRobinScheduler {
     }
 }
 
-// #[repr(C, packed)]
 #[repr(C)]
 pub struct ProcessState {
     kernel_rsp: VirtAddr,
@@ -100,7 +94,7 @@ impl ProcessState {
                 (1 << 9);  // interrupt enable flag
             // in hex: 0x0202
 
-            let mut kernel_stack: *mut usize = unsafe { ptr::from_exposed_addr_mut(kernel_addr) };
+            let kernel_stack: *mut usize = ptr::from_exposed_addr_mut(kernel_addr);
 
             let mut code_selector = if kernel {
                 KERNEL_CODE_SEGMENT_IDX * 8
@@ -112,22 +106,11 @@ impl ProcessState {
             } else {
                 3
             };
-            let mut data_selector = if kernel {
-                KERNEL_DATA_SEGMENT_IDX * 8
-            } else {
-                USER_DATA_SEGMENT_IDX * 8
-            };
-            data_selector |= if kernel {
-                0
-            } else {
-                3
-            };
 
             unsafe {
                 // https://www.felixcloutier.com/x86/iret:iretd
                 // https://wiki.osdev.org/Interrupt_Service_Routines
                 // setup the stack frame iret expects
-                // kernel_stack.offset(-0).write(data_selector); // FIXME: Is this needed?
                 kernel_stack.offset(-0).write(
                     if kernel {
                         // FIXME: Is this the correct thing to do if the privilege level doesn't change?
@@ -197,22 +180,6 @@ struct SchedulerEntry {
     balance: u64,
 }
 
-impl SchedulerEntry {
-    /*
-    fn is_kernel_owned(&self) -> bool {
-        self.state.cr3.is_none()
-    }*/
-}
-
-// maybe when the apic timer calls an interrupt, the kernel modifies the values (of the sp and ip on the kernel mode stack) to trick the cpu
-// into thinking it was at a different place before
-
-// https://forum.osdev.org/viewtopic.php?f=1&t=44423&sid=60b4c6ea2898c2a9e91761b9917c179d&start=15
-// https://wiki.osdev.org/Getting_to_Ring_3
-// https://wiki.osdev.org/Context_Switching
-// FIXME: How do we differentiate different CPU cores?
-// https://forum.osdev.org/viewtopic.php?f=1&t=22357 // FIXME: Is this still up to date?
-
 /// This function is for testing purposes only!
 pub fn start_proc(target: fn(), kernel_owned: bool) {
     SCHEDULER
@@ -238,7 +205,7 @@ fn get_idle_task() -> Arc<Mutex<(Process, Box<ProcessState>)>> {
 static mut TASK: Option<(Process, Box<ProcessState>)> = None;
 
 pub fn init() {
-    unsafe { VOID_TASK = Some(Box::new(ProcessState::new(Box::new([0; 4096]), Box::new([0; 4096]), true, idle))); }; // FIXME: Use as little data as possible
+    unsafe { VOID_TASK = Some(Box::new(ProcessState::new(Box::new([0; 256]), Box::new([0; 0]), true, idle))); }; // FIXME: Use as little data as possible
 }
 
 fn get_scheduler() -> Arc<Mutex<Box<dyn Scheduler + Send>>> {
@@ -253,7 +220,7 @@ extern "C" fn select_next_task() -> *mut ProcessState {
     let next = next.map_or_else(|| {
         replace_curr_task(None);
         get_idle_task().clone().lock().1.as_mut() as *mut ProcessState // FIXME: This is a dirty workaround and potentially dangerous, improve this!
-    }, |mut task| {
+    }, |task| {
         replace_curr_task(Some(task));
         unsafe { TASK.as_mut().unwrap() }.1.as_mut()
     }) as *mut ProcessState;
@@ -279,7 +246,7 @@ extern "C" fn current_task_ptr() -> *mut ProcessState {
         }
         let tmp = get_idle_task().clone();
         let mut tmp = tmp.lock();
-        let tmp = unsafe { tmp.1.as_mut() as *mut ProcessState };
+        let tmp = tmp.1.as_mut() as *mut ProcessState;
         tmp
     }
 }

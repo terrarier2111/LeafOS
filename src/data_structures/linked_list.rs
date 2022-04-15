@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use core::intrinsics::transmute;
 use core::mem;
 
 #[repr(transparent)]
@@ -51,10 +50,6 @@ impl<T> LinkedListNode<T> {
 
     #[inline(always)]
     pub fn to_list(self) -> LinkedList<T> {
-        /*
-        // SAFETY: This is safe because the LinkedList is transparent and thus on a binary level, they are identical
-        unsafe { transmute::<LinkedListNode<T>, LinkedList<T>>(self) }
-        */
         LinkedList(self)
     }
 

@@ -9,24 +9,14 @@ extern crate alloc;
 
 mod serial;
 
-use alloc::boxed::Box;
-use alloc::string::String;
 use core::panic::PanicInfo;
-use core::ptr::addr_of;
 use bootloader::{BootInfo, entry_point};
-use lazy_static::lazy_static;
-use spin::Mutex;
-use volatile::Volatile;
-use x2apic::lapic::TimerMode;
-use x86_64::structures::paging::{FrameAllocator, Page, PageTable, Translate};
-use x86_64::VirtAddr;
-use LeafOS::{hlt_loop, memory, println, scheduler, shell};
+use LeafOS::{hlt_loop, memory, println, scheduler};
 use LeafOS::drivers::pit;
 use LeafOS::interrupts::init_apic;
-use LeafOS::memory::BootInfoFrameAllocator;
 use LeafOS::scheduler::SCHEDULER_TIMER_DELAY;
-use crate::shell::{Shell, SHELL};
-use LeafOS::vga_buffer::ColoredString;
+
+// FIXME: Fix the keyboard handling
 
 // working build command:
 // cargo bootimage --release --target x86_64_target.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem

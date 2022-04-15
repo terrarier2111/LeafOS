@@ -1,15 +1,12 @@
-use alloc::{format, vec};
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use core::{fmt, ptr};
+use alloc::string::String;
+use core::fmt;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::{DecodedKey, KeyCode};
 use spin::{Mutex, MutexGuard};
 use x86_64::instructions::interrupts;
-use crate::println;
-use crate::vga_buffer::{ColoredString, Writer, WRITER};
+use crate::vga_buffer::{ColoredString, Writer};
 
 lazy_static! {
     pub static ref SHELL: Mutex<Shell> = Mutex::new(Shell::new(ColoredString::from_string(String::from("Test: "))));
@@ -19,8 +16,6 @@ lazy_static! {
 pub fn has_shell() -> bool {
     INITIALIZED.load(Ordering::Acquire)
 }
-
-// Mutex::new(Shell::new(ColoredString::from_string(String::from("Test: "))));
 
 pub struct Shell {
     prompt: ColoredString,
@@ -95,7 +90,7 @@ impl Shell {
         match key {
             DecodedKey::RawKey(key) => {
                 if key == KeyCode::Backspace {
-                    if self.written_char_count < 0 {
+                    if self.written_char_count > 0 {
                         let mut writer = crate::vga_buffer::WRITER.lock();
                         if writer.get_column_position() > 0 {
                             let pos = writer.get_column_position();
@@ -110,7 +105,7 @@ impl Shell {
                     // FIXME: Only print a-Z, 0-9
                     let mut writer = crate::vga_buffer::WRITER.lock();
                     interrupts::without_interrupts(|| {
-                        writer.write_fmt(format_args!("{:?}", key));
+                        writer.write_fmt(format_args!("{:?}", key)).unwrap();
                     });
                     self.written_char_count += 1;
                 }
@@ -138,7 +133,7 @@ impl Shell {
                     if key == ENTER {
                         self.newline(&mut writer);
                     } else {
-                        writer.write_fmt(format_args!("{}", key));
+                        writer.write_fmt(format_args!("{}", key)).unwrap();
                         self.written_char_count += 1;
                     }
 

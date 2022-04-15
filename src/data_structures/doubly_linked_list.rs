@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use core::intrinsics::transmute;
 use core::mem;
 
 #[repr(transparent)]
@@ -53,10 +52,6 @@ impl<T> DoublyLinkedListNode<T> {
 
     #[inline(always)]
     pub fn to_list(self) -> DoublyLinkedList<T> {
-        /*
-        // SAFETY: This is safe because the DoublyLinkedList is transparent and thus on a binary level, they are identical
-        unsafe { transmute::<DoublyLinkedListNode<T>, DoublyLinkedList<T>>(self) }
-        */
         DoublyLinkedList(self)
     }
 
