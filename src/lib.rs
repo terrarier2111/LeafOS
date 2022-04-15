@@ -28,12 +28,12 @@ pub mod print;
 pub mod events;
 pub mod shell;
 pub(crate) mod allocators;
-mod cpuid;
 pub mod drivers;
 pub mod data_structures;
 pub mod scheduler;
 pub mod process;
 pub mod filesystem;
+pub mod arch;
 
 pub fn init() {
     gdt::init();
