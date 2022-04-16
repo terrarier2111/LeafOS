@@ -35,7 +35,7 @@ bootloader = { version = "0.9.22", features = ["map_physical_memory"] }
 volatile = "0.2.7"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
 spin = "0.7.1"
-x86_64 = "0.14.8"
+x86_64 = "0.14.9" # FIXME: Remove memory related usages and usages related to VirtAddr
 x86 = "0.47.0"
 riscv = "0.7.0"
 # cortex-m = "0.7.4"

@@ -1,7 +1,7 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
-use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::instructions::port::Port;
+use crate::arch::without_interrupts;
 use crate::drivers::pit::Channel::Channel0;
 
 const CHANNEL0: u16 = 0x40; // RW

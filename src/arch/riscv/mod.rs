@@ -1,21 +1,30 @@
 use core::arch::asm;
 use riscv::register::mstatus;
 
-#[inline]
-pub fn nop() {
-    unsafe { asm!("nop") }
-}
+pub(in crate::arch) mod hal_impls {
 
-#[inline]
-pub unsafe fn enable_interrupts() {
-    riscv::interrupt::enable();
-}
+    #[inline]
+    pub(in crate::arch) fn nop() {
+        unsafe { asm!("nop") }
+    }
 
-#[inline]
-pub unsafe fn disable_interrupts() {
-    riscv::interrupt::disable();
-}
+    #[inline]
+    pub(in crate::arch) unsafe fn enable_interrupts() {
+        riscv::interrupt::enable();
+    }
 
-pub fn is_interrupts_enabled() -> bool {
-    mstatus::read().mie()
+    #[inline]
+    pub(in crate::arch) unsafe fn disable_interrupts() {
+        riscv::interrupt::disable();
+    }
+
+    pub(in crate::arch) fn is_interrupts_enabled() -> bool {
+        mstatus::read().mie()
+    }
+
+    #[inline]
+    pub(in crate::arch) unsafe fn wait_for_interrupt() {
+        riscv::asm::wfi();
+    }
+
 }

@@ -1,4 +1,4 @@
-use crate::gdt::{KERNEL_CODE_SEGMENT_IDX, KERNEL_DATA_SEGMENT_IDX, USER_CODE_SEGMENT_IDX, USER_DATA_SEGMENT_IDX};
+use crate::gdt::{KERNEL_CODE_SEGMENT_IDX, USER_CODE_SEGMENT_IDX};
 use crate::process::{Process, State};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -9,7 +9,6 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::{Mutex, Once};
-use x86_64::VirtAddr;
 use crate::println;
 
 static IDLE_TASK: Once<Arc<Mutex<(Process, Box<ProcessState>)>>> = Once::new();
@@ -77,8 +76,8 @@ impl Scheduler for RoundRobinScheduler {
 
 #[repr(C)]
 pub struct ProcessState {
-    kernel_rsp: VirtAddr,
-    kernel_top_rsp: VirtAddr,
+    kernel_rsp: u64,
+    kernel_top_rsp: u64,
     kernel_stack: Box<[u8]>,
     user_stack: Box<[u8]>,
 }
@@ -114,14 +113,14 @@ impl ProcessState {
                 kernel_stack.offset(-0).write(
                     if kernel {
                         // FIXME: Is this the correct thing to do if the privilege level doesn't change?
-                        VirtAddr::new(kernel_addr as u64).as_u64() as usize
+                        kernel_addr as usize
                     } else {
-                        VirtAddr::new(user_stack.as_mut().as_mut_ptr().expose_addr() as u64).as_u64() as usize
+                        user_stack.as_mut().as_mut_ptr().expose_addr() as usize
                     });                   // rsp (for user stack)
                 kernel_stack.offset(-1).write(DEFAULT_FLAGS);
                 kernel_stack.offset(-2).write(code_selector);
                 kernel_stack.offset(-3).write(
-                    VirtAddr::new((start_fn as *const ()).expose_addr() as u64).as_u64() as usize);       // rip
+                    (start_fn as *const ()).expose_addr() as usize);       // rip
 
                 const INTERRUPT_FRAME_OFFSET: isize = 4;
 
@@ -166,8 +165,8 @@ impl ProcessState {
         const INTERRUPT_FRAME_OFFSET: isize = 4;
 
         Self {
-            kernel_rsp: VirtAddr::new((kernel_addr - size_of::<usize>() * (14 + INTERRUPT_FRAME_OFFSET) as usize) as u64),
-            kernel_top_rsp: VirtAddr::new((kernel_addr + kernel_stack.len()) as u64),
+            kernel_rsp: (kernel_addr - size_of::<usize>() * (14 + INTERRUPT_FRAME_OFFSET) as usize) as u64,
+            kernel_top_rsp: (kernel_addr + kernel_stack.len()) as u64,
             kernel_stack,
             user_stack,
         }

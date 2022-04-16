@@ -6,6 +6,7 @@ lazy_static! {
     };
 }
 
+#[inline]
 pub fn has_cpuid() -> bool {
     *CPU_ID
 }

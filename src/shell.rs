@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::{DecodedKey, KeyCode};
 use spin::{Mutex, MutexGuard};
-use x86_64::instructions::interrupts;
+use crate::arch::without_interrupts;
 use crate::vga_buffer::{ColoredString, Writer};
 
 lazy_static! {
@@ -104,7 +104,7 @@ impl Shell {
                 } else {
                     // FIXME: Only print a-Z, 0-9
                     let mut writer = crate::vga_buffer::WRITER.lock();
-                    interrupts::without_interrupts(|| {
+                    without_interrupts(|| {
                         writer.write_fmt(format_args!("{:?}", key)).unwrap();
                     });
                     self.written_char_count += 1;

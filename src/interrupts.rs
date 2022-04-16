@@ -7,7 +7,7 @@ use spin::Mutex;
 use x2apic::lapic::{LocalApic, LocalApicBuilder, TimerDivide, TimerMode, xapic_base};
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use crate::{gdt, hlt_loop, println};
+use crate::{disable_interrupts, enable_interrupts, gdt, hlt_loop, println};
 use crate::drivers::{pic, pit};
 use crate::drivers::pit::PIT_DIVIDEND;
 use crate::events::KeyboardEvent;
@@ -41,7 +41,7 @@ pub fn init() {
         IDT.page_fault.set_handler_fn(page_fault_handler);
 
         IDT.double_fault.set_handler_fn(double_fault_handler)
-            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
+            .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX as u16);
 
         IDT[InterruptIndex::Timer.as_usize()]
             .set_handler_fn(timer_interrupt_handler);
@@ -50,6 +50,7 @@ pub fn init() {
         IDT[InterruptIndex::ApicTimer.as_usize()].set_handler_fn(apic_timer_config_handler);
         IDT[InterruptIndex::ApicError.as_usize()].set_handler_fn(apic_error_handler);
         IDT[InterruptIndex::ApicSpurious.as_usize()].set_handler_fn(apic_spurious_handler);
+        IDT[InterruptIndex::Syscall.as_usize()].set_handler_fn(syscall_handler);
     }
     unsafe { IDT.load(); }
 }
@@ -346,6 +347,7 @@ pub enum InterruptIndex {
     ApicError = 34,
     ApicSpurious = 35,
     Keyboard,
+    Syscall = 128, // 0x80
     Invalid = 255,
 }
 
@@ -356,6 +358,44 @@ impl InterruptIndex {
 
     fn as_usize(self) -> usize {
         usize::from(self.as_u8())
+    }
+}
+
+extern "x86-interrupt" fn syscall_handler(_stack_frame: InterruptStackFrame) {
+    unsafe {
+        disable_interrupts();
+        // FIXME: Also save rcx and r11 which are used for syscall bookkeeping like rax
+        /*asm!(
+        "push rax",
+        "pushd gs",
+        "pushd fs",
+        "pushd es",
+        "pushd ds",
+        "pushd -{def_err}",
+        "push rdi",
+        "push rsi",
+        "push rdx",
+        "push r10",
+        "push r8",
+        "push r9",
+        );*/
+        asm!(
+        "push rax",
+        "push rdi",
+        "push rsi",
+        "push rdx",
+        "push rcx", // r10
+        "push -{def_err}",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        );
+        enable_interrupts();
+    }
+
+    unsafe {
+        end_of_interrupt(InterruptIndex::Syscall.as_u8());
     }
 }
 

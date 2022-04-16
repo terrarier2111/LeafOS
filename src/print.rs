@@ -1,5 +1,5 @@
 use core::fmt;
-use x86_64::instructions::interrupts;
+use crate::arch::without_interrupts;
 use crate::shell::{has_shell, SHELL};
 use crate::vga_buffer::WRITER;
 #[macro_export]
@@ -19,7 +19,7 @@ macro_rules! println {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
-    interrupts::without_interrupts(|| {
+    without_interrupts(|| {
         if has_shell() {
             SHELL.lock().write_fmt(args).unwrap();
         } else {

@@ -17,6 +17,7 @@ use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
+use crate::arch::{enable_interrupts, disable_interrupts, wait_for_interrupt};
 use crate::shell::{has_shell, SHELL};
 
 pub mod vga_buffer;
@@ -34,12 +35,14 @@ pub mod scheduler;
 pub mod process;
 pub mod filesystem;
 pub mod arch;
+pub mod syscall;
+pub mod error_codes;
 
 pub fn init() {
     gdt::init();
     interrupts::init();
     unsafe { interrupts::PICS.lock().initialize() };
-    x86_64::instructions::interrupts::enable();
+    unsafe { enable_interrupts() }
 }
 
 pub fn init_kb_handler() {
@@ -118,7 +121,7 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
 
 pub fn hlt_loop() -> ! {
     loop {
-        x86_64::instructions::hlt();
+        unsafe { wait_for_interrupt(); }
     }
 }
 
