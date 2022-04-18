@@ -28,4 +28,8 @@ pub(in crate::arch) mod hal_impls {
         cortex_a::asm::wfi();
     }
 
+    pub(in crate::arch) unsafe fn break_point() {
+        todo!()
+    }
+
 }

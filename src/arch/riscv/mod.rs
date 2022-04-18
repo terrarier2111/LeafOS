@@ -27,4 +27,9 @@ pub(in crate::arch) mod hal_impls {
         riscv::asm::wfi();
     }
 
+    #[inline]
+    pub(in crate::arch) unsafe fn break_point() {
+        riscv::asm::ebreak();
+    }
+
 }

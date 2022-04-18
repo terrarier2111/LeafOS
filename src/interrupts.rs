@@ -379,23 +379,31 @@ extern "x86-interrupt" fn syscall_handler(_stack_frame: InterruptStackFrame) {
         "push r8",
         "push r9",
         );*/
-        asm!(
-        "push rax",
-        "push rdi",
-        "push rsi",
-        "push rdx",
-        "push rcx", // r10
-        "push -{def_err}",
-        "push r8",
-        "push r9",
-        "push r10",
-        "push r11",
-        );
-        enable_interrupts();
-    }
 
-    unsafe {
+        asm!(
+        "push 0", // default error
+        "push r9",
+        "push r8",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rax",
+
+        "call handle_syscall",
+
+        "add rsp, 8", // pop _
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop r8",
+        "pop r9",
+        "pop rax", // (potential) error
+        );
+
         end_of_interrupt(InterruptIndex::Syscall.as_u8());
+        enable_interrupts();
     }
 }
 

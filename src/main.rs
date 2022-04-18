@@ -4,6 +4,7 @@
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 #![feature(const_mut_refs)]
+#![feature(strict_provenance)]
 
 extern crate alloc;
 
@@ -11,10 +12,12 @@ mod serial;
 
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
+use x86::syscall;
 use LeafOS::{hlt_loop, memory, println, scheduler};
 use LeafOS::drivers::pit;
 use LeafOS::interrupts::init_apic;
 use LeafOS::scheduler::SCHEDULER_TIMER_DELAY;
+use LeafOS::syscall::{do_syscall_3, STDOUT_FD, WRITE};
 
 // FIXME: Fix the keyboard handling
 
@@ -59,13 +62,16 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
 fn test_fn() {
     loop {
-        println!("test1");
+        // println!("test1");
+        // syscall!()
+        static MSG: &str = "TESTeee!";
+        unsafe { do_syscall_3(WRITE, STDOUT_FD, MSG.as_ptr().expose_addr(), MSG.len()); }
     }
 }
 
 fn test_fn_hello() {
     loop {
-        println!("HELLO");
+        // println!("HELLO");
     }
 }
 

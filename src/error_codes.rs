@@ -1,1 +1,5 @@
-pub const ENOSYS: usize = 38;
+#[repr(usize)]
+pub enum Error {
+    EIO = 5,
+    ENOSYS = 38,
+}

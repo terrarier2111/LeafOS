@@ -31,6 +31,11 @@ pub(in crate::arch) mod hal_impls {
         x86::halt();
     }
 
+    #[inline]
+    pub(in crate::arch) unsafe fn break_point() {
+        asm!("int3");
+    }
+
 }
 
 pub fn flags() -> usize {

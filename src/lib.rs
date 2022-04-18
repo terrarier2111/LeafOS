@@ -9,7 +9,8 @@
 #![feature(step_trait)]
 #![feature(strict_provenance)]
 #![feature(naked_functions)]
-#![feature(abi_x86_interrupt)] // used for checking for presence of cpuid instruction
+#![feature(abi_x86_interrupt)]
+#![feature(ptr_metadata)] // used for checking for presence of cpuid instruction
 
 extern crate alloc;
 
