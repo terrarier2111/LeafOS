@@ -9,7 +9,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::{Mutex, Once};
-use crate::println;
+use crate::{println, wait_for_interrupt};
 
 static IDLE_TASK: Once<Arc<Mutex<(Process, Box<ProcessState>)>>> = Once::new();
 static INIT: AtomicBool = AtomicBool::new(false); // FIXME: Make this per-core.
@@ -21,7 +21,7 @@ lazy_static! {
     };
 }
 
-pub const SCHEDULER_TIMER_DELAY: usize = 10000000;
+pub const SCHEDULER_TIMER_DELAY: usize = 1000000;
 
 pub trait Scheduler {
     // this is for internal use only
@@ -187,9 +187,9 @@ pub fn start_proc(target: fn(), kernel_owned: bool) {
 }
 
 fn idle() {
-    // FIXME: Implement efficient idle fn
     loop {
-        println!("idling...!");
+        // println!("idling...!");
+        unsafe { wait_for_interrupt(); }
     }
 }
 

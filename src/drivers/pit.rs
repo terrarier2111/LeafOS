@@ -95,6 +95,7 @@ fn set_pit_count(count: u16) {
     })
 }
 
+#[inline]
 pub fn init() {
     set_frequency(PIT_FREQUENCY_HZ);
 }
@@ -116,39 +117,6 @@ fn set_frequency(frequency: usize) {
 pub fn write_channel0_count(count: u16) {
     write_mode(Channel0, AccessMode::LoHiByte, OperatingMode::RateGenerator, DataMode::Binary);
     set_pit_count(count)
-}
-
-static COUNTDOWN: AtomicU64 = AtomicU64::new(0);
-
-/// SAFETY:
-/// The caller has to ensure that no other countdown is currently running
-/// furthermore the caller has to ensure that the PIT is initialized
-unsafe fn sleep(millis: u64) {
-    COUNTDOWN.store(millis, Ordering::SeqCst);
-    loop {
-        let curr = without_interrupts(|| {
-            COUNTDOWN.load(Ordering::SeqCst)
-        });
-        if curr == 0 {
-            break;
-        }
-        // nop a few times so the interrupt can get handled
-        asm!(
-        "nop",
-        "nop",
-        "nop",
-        "nop",
-        "nop",
-        "nop",
-        );
-    }
-}
-
-pub fn handle_timer() {
-    let curr = COUNTDOWN.load(Ordering::SeqCst);
-    if curr != 0 {
-        COUNTDOWN.store(curr - 1, Ordering::SeqCst);
-    }
 }
 
 // FIXME: Finish this implementation with the help from: https://wiki.osdev.org/Programmable_Interval_Timer

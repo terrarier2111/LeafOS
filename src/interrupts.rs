@@ -7,7 +7,7 @@ use spin::Mutex;
 use x2apic::lapic::{LocalApic, LocalApicBuilder, TimerDivide, TimerMode, xapic_base};
 use x86_64::instructions::port::Port;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use crate::{disable_interrupts, enable_interrupts, gdt, hlt_loop, println};
+use crate::{disable_interrupts, enable_interrupts, gdt, hlt_loop, println, wait_for_interrupt};
 use crate::drivers::{pic, pit};
 use crate::drivers::pit::PIT_DIVIDEND;
 use crate::events::KeyboardEvent;
@@ -67,23 +67,24 @@ pub unsafe fn init_apic(physical_memory_offset: u64) {
         .build()
         .unwrap_or_else(|err| panic!("{}", err));
     LAPIC.replace(lapic);
-    // lapic was enabled, we can now safely disable the pic
     {
-        LAPIC.as_mut().unwrap().set_timer_divide(TimerDivide::Div2/*TimerDivide::Div64*/);
+        LAPIC.as_mut().unwrap().set_timer_divide(TimerDivide::Div64);
         LAPIC.as_mut().unwrap().set_timer_initial(TIMER_DELAY as u32);
         LAPIC.as_mut().unwrap().set_timer_mode(TimerMode::OneShot);
         pit::write_channel0_count(TIMER_DELAY);
     }
     LAPIC.as_mut().unwrap().enable();
+    // lapic was enabled, we can now safely disable the pic
+    pic::disable(); // FIXME: Should we do this before LAPIC is enabled?
 
-    while LAPIC.as_mut().unwrap().timer_current() > 0 {
-        println!("apicccc {}", LAPIC.as_mut().unwrap().timer_current());
+    while !TRIGGERED_ONCE.load(Ordering::SeqCst) {
+        wait_for_interrupt();
     }
 
     let end = pit::read_pit_count() as usize;
+    println!("pit end: {}", end);
     let frequency = (TIMER_DELAY as usize) / ((TIMER_DELAY as usize) - end) * PIT_DIVIDEND;
     APIC_TIMER_FREQUENCY.store(frequency, Ordering::Relaxed);
-    pic::disable();
     // replace the IDT entry of the apic timer with a new one (for scheduling)
     IDT[InterruptIndex::ApicTimer.as_usize()].set_handler_fn(apic_timer_handler);
 
@@ -333,7 +334,7 @@ static mut LAPIC: Option<LocalApic> = None;
 
 pub fn start_timer_one_shot(us: usize) {
     unsafe {
-        LAPIC.as_mut().unwrap().set_timer_divide(TimerDivide::Div2);
+        LAPIC.as_mut().unwrap().set_timer_divide(TimerDivide::Div64);
         LAPIC.as_mut().unwrap().set_timer_mode(TimerMode::OneShot);
         LAPIC.as_mut().unwrap().set_timer_initial((us * (APIC_TIMER_FREQUENCY.load(Ordering::SeqCst) / 1000000)) as u32);
     }
@@ -410,8 +411,6 @@ extern "x86-interrupt" fn syscall_handler(_stack_frame: InterruptStackFrame) {
 extern "x86-interrupt" fn timer_interrupt_handler(
     _stack_frame: InterruptStackFrame)
 {
-    pit::handle_timer();
-
     // This notifies the cpu that the interrupt was processed and that it can send the next one as soon as it's ready/triggered
     unsafe {
         end_of_interrupt(InterruptIndex::Timer.as_u8());
