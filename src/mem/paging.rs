@@ -215,6 +215,9 @@ impl DefaultFrameAllocator {
         // there are slightly more allocations than deallocations and especially on program startups, massive amounts of memory will be allocated
         // so to improve startup times we should prefer allocations over deallocations, furthermore usually program startup times are way more important
         // "program stop times"
+        // FIXME: BUT HOW TF SHOULD LARGER ALLOCATIONS (more than 1 page) WORK IF WE HAVE METADATA CONTAINED INSIDE PAGES?
+        // could we just save necessary metadata at the beginning of each allocation and not every page?
+        // i.e each allocation no matter what order should only ever contain metadata at the beginning
 
         // page layout:
         // 78 bits: doubly linked list data
