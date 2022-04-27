@@ -71,7 +71,7 @@ fn test_fn() {
 
 fn test_fn_hello() {
     loop {
-        // println!("HELLO");
+        println!("HELLO");
     }
 }
 

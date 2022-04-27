@@ -10,6 +10,7 @@
 #![feature(strict_provenance)]
 #![feature(naked_functions)]
 #![feature(abi_x86_interrupt)]
+#![feature(int_roundings)]
 #![feature(ptr_metadata)] // used for checking for presence of cpuid instruction
 
 extern crate alloc;
@@ -38,6 +39,7 @@ pub mod filesystem;
 pub mod arch;
 pub mod syscall;
 pub mod error_codes;
+mod mem;
 
 pub fn init() {
     gdt::init();
