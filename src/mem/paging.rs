@@ -7,7 +7,7 @@ use bitflags::bitflags;
 use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use core::arch::asm;
 use core::borrow::{Borrow, BorrowMut};
-use core::ops::Range;
+use core::ops::{BitAnd, BitAndAssign, BitOrAssign, Range, Shl, Shr};
 use core::ptr;
 use intrusive_collections::{LinkedList, SinglyLinkedList};
 use x86::controlregs::{cr4, Cr4};
@@ -85,9 +85,11 @@ struct FreeArea {
 }
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
+#[repr(C)]
 pub struct DefaultFrameAllocator {
     memory_map: &'static MemoryMap,
-    order_maps: [&'static mut [u64]; MAX_ORDER], // bit maps for different orders to determine which pages are still free
+    order_maps: [BitMap<u64, 1_u64>; MAX_ORDER], // bit maps for different orders to determine which pages are still free
+    orders: [usize; MAX_ORDER], // represents a list of addresses (in the compressed order format described below)
 }
 
 impl DefaultFrameAllocator {
@@ -116,8 +118,8 @@ impl DefaultFrameAllocator {
         for i in 1..MAX_ORDER {
             req_mem[i] = req_mem[i - 1] / 2 + 1; // we have to make sure we don't allocate too little memory (too much is okay), so we add 1
         }
-        let mut order_maps: [&'static mut [u64]; MAX_ORDER] =
-            [ptr::null_mut() as &'static mut [u64]; MAX_ORDER];
+        let mut order_maps =
+            [BitMap::new(ptr::null_mut() as &'static mut [u64]); MAX_ORDER];
         let mut found_orders = 0_u64; // FIXME: Replace this with some other solution if we ever want to use more than 64 orders
         let final_orders = *0_u64.set_bits(0..9);
 
@@ -155,7 +157,7 @@ impl DefaultFrameAllocator {
                     let max_mem_range = usable_start..(entry.range.start_addr() - 4096);
                     let used_mem_range = max_mem_range.start..(max_mem_range.end - (extra_frames * 4096));
                     let used_end = used_mem_range.end;
-                    order_maps[order] = ptr::from_exposed_addr_mut(used_mem_range.start as usize) as &'static mut [u64];
+                    order_maps[order] = BitMap::new(ptr::from_exposed_addr_mut(used_mem_range.start as usize) as &'static mut [u64]);
                     used.borrow_mut().push_front(used_mem_range);
                     found_orders |= (1 << order);
                     if found_orders == final_orders {
@@ -180,7 +182,7 @@ impl DefaultFrameAllocator {
                 let max_mem_range = usable_start..(entry.range.start_addr() - 4096);
                 let used_mem_range = max_mem_range.start..(max_mem_range.end - (extra_frames * 4096));
                 let used_end = used_mem_range.end;
-                order_maps[order] = ptr::from_exposed_addr_mut(used_mem_range.start as usize) as &'static mut [u64];
+                order_maps[order] = BitMap::new(ptr::from_exposed_addr_mut(used_mem_range.start as usize) as &'static mut [u64]);
                 used.borrow_mut().push_front(used_mem_range);
                 found_orders |= (1 << order);
                 if found_orders == final_orders {
@@ -220,30 +222,56 @@ impl DefaultFrameAllocator {
         // i.e each allocation no matter what order should only ever contain metadata at the beginning
 
         // page layout:
-        // 78 bits: doubly linked list data
-        // 2 bits: unused, reserved for future usage
+        // 39 bits: next entry data
+        // 1 bit: unused, reserved for future usage
+        // 39 bits: prev entry data
+        // 1 bit: unused, reserved for future usage
         // 4086 * 8 bits: reserved for allocator usage
 
-        Self { memory_map, order_maps }
+        Self { memory_map, order_maps, orders: [0; MAX_ORDER] }
     }
 
-    fn page_next_ptr(page_addr: usize) -> *mut u8 {
+    fn entry_next_ptr(entry_addr: usize) -> *mut u8 {
         const MASK: usize = (1 << 39) - 1; // the 39 lower bits are set
-        let metadata = *(ptr::from_exposed_addr(page_addr) as &usize);
-        let link = (metadata & MASK) * 4096;
+        let metadata_part = *(ptr::from_exposed_addr(entry_addr) as &usize);
+        let link = (metadata_part & MASK) * 4096;
         link as *mut u8
     }
 
-    fn page_prev_ptr(page_addr: usize) -> *mut u8 {
-        const MASK: usize = usize::MAX - ((1 << 39) - 1); // the upper 25 bits are set
-        let first_metadata_part = *(ptr::from_exposed_addr(page_addr) as &usize);
-        let mut link = first_metadata_part & MASK;
-        const SECOND_MASK: usize = (1 << 14) - 1; // the lower 14 bits are set
-        let second_metadata_part = *(ptr::from_exposed_addr(page_addr) as &u16) as usize;
-        link |= ((second_metadata_part) & SECOND_MASK) << 25;
-        let link = link * 4096;
-        link as *mut u8
+    #[inline]
+    fn entry_prev_ptr(entry_addr: usize) -> *mut u8 {
+        Self::entry_next_ptr(entry_addr + 5)
     }
+
+    fn entry_meta_first(entry_addr: usize) -> usize {
+        const MASK: usize = 1 << 40;
+        let metadata_part = *(ptr::from_exposed_addr(entry_addr) as &usize);
+        let meta = metadata_part & MASK;
+        meta >> 40
+    }
+
+    #[inline]
+    fn entry_meta_second(entry_addr: usize) -> usize {
+        Self::entry_meta_first(entry_addr + 5)
+    }
+
+    #[inline]
+    fn entry_meta_full(entry_addr: usize) -> usize {
+        Self::entry_meta_first(entry_addr) | (Self::entry_meta_second(entry_addr) << 1)
+    }
+
+    fn write_entry_next(entry_addr: usize, next_entry_addr: usize) {
+        let metadata_part = next_entry_addr / 4096;
+        let metadata_part_addr = ptr::from_exposed_addr_mut(entry_addr) as &mut usize;
+        *metadata_part_addr = metadata_part;
+    }
+
+    #[inline]
+    fn write_entry_prev(entry_addr: usize, prev_entry_addr: usize) {
+        Self::write_entry_next(entry_addr + 5, prev_entry_addr)
+    }
+
+    // FIXME: Create metadata write functions!
 
     /*fn mark_used(&mut self, index: u64, order: u64, area: &mut FreeArea) {
         // __change_bit((index) >> (1+(order)), (area)->map)
@@ -264,20 +292,87 @@ impl DefaultFrameAllocator {
     }
 
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        self.allocate_frames(0)
+        self.allocate_frames(0).map(|addr| PhysFrame::containing_address(addr))
     }
 
-    fn allocate_frames(&mut self, order: usize) -> Option<PhysFrame> {
+    fn allocate_frames(&mut self, order: usize) -> Option<PhysAddr> {
         let mut curr_order = order;
-        while MAX_ORDER > curr_order && self.orders[curr_order].list.borrow().is_empty() {
+        while MAX_ORDER > curr_order && self.orders[curr_order] == 0 {
             curr_order += 1;
         }
-        if curr_order == MAX_ORDER {
+        if curr_order >= MAX_ORDER {
             return None;
         }
 
-        None
+        let entry = self.orders[curr_order] * 4096;
+
+        // retrieve next entry and update its metadata
+        let next_entry = Self::entry_next_ptr(entry);
+        self.orders[curr_order] = next_entry / 4096;
+        Self::write_entry_prev(next_entry.expose_addr(), 0);
+
+        // also update the bitmap
+        self.order_maps[curr_order].unset(entry / 4096);
+
+        // Split up the buddy until we have the desired size
+        while curr_order > order {
+            // FIXME: Perform proper splitting
+        }
+
+        todo!()
     }
+
+    fn deallocate_frame(&mut self, address: PhysAddr) {
+        self.deallocate_frames(address, 0);
+    }
+
+    fn deallocate_frames(&mut self, _address: PhysAddr, _order: usize) {
+
+    }
+}
+
+struct BitMap<T: Copy + BitAnd + Shr + Shl + BitOrAssign + BitAndAssign, const ONE: T> {
+    backing: &'static mut [T],
+}
+
+impl<T: Copy + BitAnd + Shr + Shl + BitOrAssign + BitAndAssign, const ONE: T> BitMap<T, ONE> {
+
+    #[inline]
+    pub fn new(backing: &'static mut [T]) -> Self {
+        Self {
+            backing
+        }
+    }
+
+    #[inline]
+    fn index_to_offset_and_bit_idx(index: usize) -> (usize, usize) {
+        (index.div_floor(64), index % 64)
+    }
+
+    #[inline]
+    pub fn get(&self, index: usize) -> bool {
+        let (offset, bit_idx) = Self::index_to_offset_and_bit_idx(index);
+        self.backing[offset] & bit_idx != 0
+    }
+
+    #[inline]
+    pub fn get_raw(&self, index: usize) -> T {
+        let (offset, bit_idx) = Self::index_to_offset_and_bit_idx(index);
+        (self.backing[offset] & bit_idx) >> bit_idx
+    }
+
+    #[inline]
+    pub fn set(&mut self, index: usize) {
+        let (offset, bit_idx) = Self::index_to_offset_and_bit_idx(index);
+        self.backing[offset] |= ONE << bit_idx;
+    }
+
+    #[inline]
+    pub fn unset(&mut self, index: usize) {
+        let (offset, bit_idx) = Self::index_to_offset_and_bit_idx(index);
+        self.backing[offset] &= (!(ONE << bit_idx));
+    }
+
 }
 
 /// Conceptually this represents splitting a parent buddy into two smaller ones (children)
@@ -285,6 +380,7 @@ impl DefaultFrameAllocator {
 /// is located at `base`.
 ///
 /// `order` is the order of the parent buddy
+#[inline]
 fn split_buddy(base: PhysAddr, order: u64) -> PhysAddr {
     base + (2 << (order - 1))
 }

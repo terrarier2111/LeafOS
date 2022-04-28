@@ -5,13 +5,14 @@
 #![feature(alloc_error_handler)]
 #![feature(const_mut_refs)]
 #![no_std]
-#![feature(stdsimd)]
+#![feature(stdsimd)] // used for checking for presence of cpuid instruction
 #![feature(step_trait)]
 #![feature(strict_provenance)]
 #![feature(naked_functions)]
 #![feature(abi_x86_interrupt)]
 #![feature(int_roundings)]
-#![feature(ptr_metadata)] // used for checking for presence of cpuid instruction
+#![feature(ptr_metadata)]
+#![feature(adt_const_params)]
 
 extern crate alloc;
 
