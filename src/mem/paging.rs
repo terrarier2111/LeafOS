@@ -230,7 +230,7 @@ impl DefaultFrameAllocator {
     fn page_next_ptr(page_addr: usize) -> *mut u8 {
         const MASK: usize = (1 << 39) - 1; // the 39 lower bits are set
         let metadata = *(ptr::from_exposed_addr(page_addr) as &usize);
-        let link = metadata & MASK;
+        let link = (metadata & MASK) * 4096;
         link as *mut u8
     }
 
@@ -238,9 +238,10 @@ impl DefaultFrameAllocator {
         const MASK: usize = usize::MAX - ((1 << 39) - 1); // the upper 25 bits are set
         let first_metadata_part = *(ptr::from_exposed_addr(page_addr) as &usize);
         let mut link = first_metadata_part & MASK;
-        const SECOND_MASK: usize = (1 << 14) - 1;
+        const SECOND_MASK: usize = (1 << 14) - 1; // the lower 14 bits are set
         let second_metadata_part = *(ptr::from_exposed_addr(page_addr) as &u16) as usize;
         link |= ((second_metadata_part) & SECOND_MASK) << 25;
+        let link = link * 4096;
         link as *mut u8
     }
 
