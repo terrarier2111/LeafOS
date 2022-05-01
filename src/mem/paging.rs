@@ -77,7 +77,8 @@ pub unsafe fn init(physical_memory_offset: u64) -> OffsetPageTable<'static> {
 }
 
 const PAGE_SIZE: usize = 4096;
-const MAX_ORDER: usize = 10; // 2 ^ MAX_ORDER * PAGE_SIZE will be the size of the biggest blocks
+const MAX_ORDER: usize = 9; // 2 ^ MAX_ORDER * PAGE_SIZE will be the size of the biggest blocks
+const ORDERS: usize = MAX_ORDER + 1;
 
 struct FreeArea {
     pub list: SinglyLinkedList<u64>,
@@ -88,7 +89,7 @@ struct FreeArea {
 #[repr(C)]
 pub struct DefaultFrameAllocator {
     memory_map: &'static MemoryMap,
-    order_maps: [BitMap<u64, 1_u64>; MAX_ORDER], // bit maps for different orders to determine which pages are still free
+    order_maps: [BitMap<u64, 1_u64>; ORDERS], // bit maps for different orders to determine which pages are still free
     orders: [usize; MAX_ORDER], // represents a list of addresses (in the compressed order format described below)
 }
 
@@ -99,7 +100,7 @@ impl DefaultFrameAllocator {
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
     pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
-        let mut req_mem = [0; MAX_ORDER]; // FIXME: Do we need to make this static to not dynamically allocate memory
+        let mut req_mem = [0; ORDERS]; // FIXME: Do we need to make this static to not dynamically allocate memory
 
         // FIXME: Replace memory_map with our own or the one of stivale2 https://wiki.osdev.org/Detecting_Memory_(x86)
         /*let mut orders = [FreeArea {
@@ -115,11 +116,11 @@ impl DefaultFrameAllocator {
         let frame_count = last_entry.div_ceil(4096); // we have to make sure we don't allocate too little memory (too much is okay), so we ceil
 
         req_mem[0] = frame_count / 64 + 1; // we have to make sure we don't allocate too little memory (too much is okay), so we add 1
-        for i in 1..MAX_ORDER {
+        for i in 1..ORDERS {
             req_mem[i] = req_mem[i - 1] / 2 + 1; // we have to make sure we don't allocate too little memory (too much is okay), so we add 1
         }
         let mut order_maps =
-            [BitMap::new(ptr::null_mut() as &'static mut [u64]); MAX_ORDER];
+            [BitMap::new(ptr::null_mut() as &'static mut [u64]); ORDERS];
         let mut found_orders = 0_u64; // FIXME: Replace this with some other solution if we ever want to use more than 64 orders
         let final_orders = *0_u64.set_bits(0..9);
 
@@ -127,7 +128,7 @@ impl DefaultFrameAllocator {
         let mut usable_entries = 0; // FIXME: Is this needed?
         let mut usable_start = 0;
 
-        fn find_matching_order(req_mem: &mut [u64; MAX_ORDER], usable_mem: u64, found_orders: u64) -> Option<usize> {
+        fn find_matching_order(req_mem: &mut [u64; ORDERS], usable_mem: u64, found_orders: u64) -> Option<usize> {
             for req in req_mem.iter().enumerate() {
                 if found_orders & (1 << req.0) == 0 && *req.1 < usable_mem {
                     return Some(req.0);
@@ -228,7 +229,7 @@ impl DefaultFrameAllocator {
         // 1 bit: unused, reserved for future usage
         // 4086 * 8 bits: reserved for allocator usage
 
-        Self { memory_map, order_maps, orders: [0; MAX_ORDER] }
+        Self { memory_map, order_maps, orders: [0; ORDERS] }
     }
 
     fn entry_next_ptr(entry_addr: usize) -> *mut u8 {
@@ -260,15 +261,42 @@ impl DefaultFrameAllocator {
         Self::entry_meta_first(entry_addr) | (Self::entry_meta_second(entry_addr) << 1)
     }
 
-    fn write_entry_next(entry_addr: usize, next_entry_addr: usize) {
-        let metadata_part = next_entry_addr / 4096;
+    fn write_entry_next<const KEEP_OTHER_DATA: bool, const RAW: bool>(entry_addr: usize, next_entry_addr: usize) {
+        let metadata_part = {
+            let mut tmp = if RAW {
+                next_entry_addr
+            } else {
+                next_entry_addr / 4096
+            };
+            if KEEP_OTHER_DATA {
+                tmp |= (((*(ptr::from_exposed_addr_mut(entry_addr + 4) as &mut u32)) >> 8) as usize) << 40; // only keep the last 3 bytes
+            }
+            tmp
+        };
         let metadata_part_addr = ptr::from_exposed_addr_mut(entry_addr) as &mut usize;
         *metadata_part_addr = metadata_part;
     }
 
     #[inline]
-    fn write_entry_prev(entry_addr: usize, prev_entry_addr: usize) {
-        Self::write_entry_next(entry_addr + 5, prev_entry_addr)
+    fn write_entry_prev<const KEEP_OTHER_DATA: bool, const RAW: bool>(entry_addr: usize, prev_entry_addr: usize) {
+        Self::write_entry_next::<KEEP_OTHER_DATA, RAW>(entry_addr + 5, prev_entry_addr)
+    }
+
+    fn is_free(entry_addr: usize) -> bool {
+        let first_part = ptr::from_exposed_addr(entry_addr) as *const u64;
+        let second_part = ptr::from_exposed_addr(entry_addr + 8) as *const u16;
+        // we have to check both the entire next ptr and prev ptr in order to not get in trouble
+        // if we are at the very last entry in the free list
+        unsafe { *first_part == 0 && *second_part == 0 }
+    }
+
+    fn free_entry(entry_addr: usize) {
+        let first_part = ptr::from_exposed_addr_mut(entry_addr) as *mut u64;
+        let second_part = ptr::from_exposed_addr_mut(entry_addr + 8) as *mut u16;
+        unsafe {
+            *first_part = 0;
+            *second_part = 0;
+        }
     }
 
     // FIXME: Create metadata write functions!
@@ -312,22 +340,40 @@ impl DefaultFrameAllocator {
         Self::write_entry_prev(next_entry.expose_addr(), 0);
 
         // also update the bitmap
-        self.order_maps[curr_order].unset(entry / 4096);
+        self.order_maps[curr_order].unset(entry / 4096); // FIXME: Shouldn't this be in the loop below?
 
+        let phys_addr = PhysAddr::new(entry as u64);
         // Split up the buddy until we have the desired size
         while curr_order > order {
-            // FIXME: Perform proper splitting
+            curr_order -= 1;
+            let other = split_buddy(phys_addr, curr_order + 1);
+            let prev_head = self.orders[curr_order];
+            Self::write_entry_next::<false, true>(other.as_u64() as usize, prev_head);
+            Self::write_entry_prev::<false, true>(other.as_u64() as usize, 0);
+            self.orders[curr_order] = other.as_u64() as usize / 4096; // convert into internal repr and replace current list head
+            Self::write_entry_prev::<true, false>(prev_head * 4096, other.as_u64() as usize);
+            // FIXME: Handle buddy we want to use - THIS IS PROBABLY ALREADY DONE!
         }
 
-        todo!()
+        // FIXME: Remove bitmap and do used checks based on the values of prev and next (if they are 0)
+        Some(phys_addr)
     }
 
     fn deallocate_frame(&mut self, address: PhysAddr) {
         self.deallocate_frames(address, 0);
     }
 
-    fn deallocate_frames(&mut self, _address: PhysAddr, _order: usize) {
-
+    fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
+        Self::free_entry(address.as_u64() as usize);
+        let mut new_order = order;
+        while MAX_ORDER > order {
+            let other_buddy = other_buddy(address, order);
+            if !Self::is_free(other_buddy.as_u64() as usize) {
+                break;
+            }
+            Self::free_entry(other_buddy.as_u64() as usize);
+            new_order += 1;
+        }
     }
 }
 
@@ -381,15 +427,23 @@ impl<T: Copy + BitAnd + Shr + Shl + BitOrAssign + BitAndAssign, const ONE: T> Bi
 ///
 /// `order` is the order of the parent buddy
 #[inline]
-fn split_buddy(base: PhysAddr, order: u64) -> PhysAddr {
+fn split_buddy(base: PhysAddr, order: usize) -> PhysAddr {
     base + (2 << (order - 1))
 }
 
-/*fn other_buddy(curr_buddy: PhysAddr, order: u64) -> PhysAddr {
+/// `order` is the order of the child (probably - CHECK THIS!)
+fn other_buddy(curr_buddy: PhysAddr, order: usize) -> PhysAddr {
+    let buddy_size = 4096_u64 * (1 << order);
+    let base = curr_buddy.align_down(buddy_size * 2);
 
-}*/
+    if base == curr_buddy {
+        curr_buddy + buddy_size
+    } else {
+        curr_buddy
+    }
+}
 
-// FIXME: Linux only ever moves 2 smaller buddies into one bigger one if both smaller ones are useable by simply treating the unusable buddy as already usedy
+// FIXME: Linux only ever moves 2 smaller buddies into one bigger one if both smaller ones are usable by simply treating the unusable buddy as already used
 
 pub fn setup(
     memory_map: &'static MemoryMap,
