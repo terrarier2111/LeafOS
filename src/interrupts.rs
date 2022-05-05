@@ -1,4 +1,5 @@
 use core::arch::asm;
+use core::mem::transmute;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::{HandleControl, Keyboard, layouts, ScancodeSet1};
@@ -219,7 +220,8 @@ extern "x86-interrupt" fn page_fault_handler(
 
     println!("EXCEPTION: PAGE FAULT");
     println!("Accessed Address: {:?}", Cr2::read());
-    println!("Error Code: {:?}", error_code);
+    println!("Error Code: {:?}", error_code.clone());
+    println!("Raw Error code: {}", unsafe { transmute::<PageFaultErrorCode, u64>(error_code) });
     println!("{:#?}", stack_frame);
     hlt_loop();
 }

@@ -7,7 +7,6 @@ use crate::memory;
 // Virtual memory blocks: pages
 // Physical memory blocks: frames
 
-
 /// Returns a mutable reference to the active level 4 table.
 ///
 /// This function is unsafe because the caller must guarantee that the
@@ -96,11 +95,10 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 pub fn setup(memory_map: &'static MemoryMap, physical_memory_offset: u64) -> (OffsetPageTable, BootInfoFrameAllocator) {
     let phys_mem_offset = VirtAddr::new(physical_memory_offset);
     // initialize a mapper
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut mapper = unsafe { init(phys_mem_offset) };
     let mut frame_allocator = unsafe {
         BootInfoFrameAllocator::init(memory_map)
     };
     crate::allocators::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
     (mapper, frame_allocator)
-}

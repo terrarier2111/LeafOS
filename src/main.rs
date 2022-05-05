@@ -13,9 +13,10 @@ mod serial;
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
 use x86::syscall;
-use LeafOS::{hlt_loop, memory, println, scheduler};
+use LeafOS::{hlt_loop, mem, memory, println, scheduler};
 use LeafOS::drivers::pit;
 use LeafOS::interrupts::init_apic;
+use LeafOS::mem::mapped_page_table::FrameAllocator;
 use LeafOS::scheduler::SCHEDULER_TIMER_DELAY;
 use LeafOS::syscall::{do_syscall_3, STDOUT_FD, WRITE};
 
@@ -38,7 +39,11 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     println!("Initialization succeeded!");
 
-    let (table, allocator) = memory::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
+    let (table, mut allocator) = mem::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
+    println!("allocating test thingy!");
+    let test_page = allocator.allocate_frame().unwrap();
+
+    hlt_loop();
     scheduler::init();
     unsafe { init_apic(boot_info.physical_memory_offset); }
     pit::init();

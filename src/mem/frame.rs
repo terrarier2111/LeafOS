@@ -1,8 +1,6 @@
 //! Abstractions for default-sized and huge physical memory frames.
 
 use super::page::AddressNotAligned;
-use crate::structures::paging::page::{PageSize, Size4KiB};
-use crate::PhysAddr;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
@@ -37,7 +35,6 @@ impl<S: PageSize> PhysFrame<S> {
     ///
     /// The address must be correctly aligned.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
     pub unsafe fn from_start_address_unchecked(start_address: PhysAddr) -> Self {
         PhysFrame {
             start_address,
@@ -56,28 +53,24 @@ impl<S: PageSize> PhysFrame<S> {
 
     /// Returns the start address of the frame.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
     pub fn start_address(self) -> PhysAddr {
         self.start_address
     }
 
     /// Returns the size the frame (4KB, 2MB or 1GB).
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
     pub fn size(self) -> u64 {
         S::SIZE
     }
 
     /// Returns a range of frames, exclusive `end`.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
     pub fn range(start: PhysFrame<S>, end: PhysFrame<S>) -> PhysFrameRange<S> {
         PhysFrameRange { start, end }
     }
 
     /// Returns a range of frames, inclusive `end`.
     #[inline]
-    #[rustversion::attr(since(1.61), const)]
     pub fn range_inclusive(start: PhysFrame<S>, end: PhysFrame<S>) -> PhysFrameRangeInclusive<S> {
         PhysFrameRangeInclusive { start, end }
     }

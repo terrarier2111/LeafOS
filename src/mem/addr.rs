@@ -7,9 +7,6 @@ use core::fmt;
 use core::iter::Step;
 use core::ops::{Add, AddAssign, Sub, SubAssign};
 
-use crate::structures::paging::page_table::PageTableLevel;
-use crate::structures::paging::{PageOffset, PageTableIndex};
-use bit_field::BitField;
 use crate::mem::page_table::{PageOffset, PageTableIndex, PageTableLevel};
 
 #[cfg(feature = "step_trait")]

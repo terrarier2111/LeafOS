@@ -1,8 +1,9 @@
 use linked_list_allocator::LockedHeap;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB};
-use x86_64::structures::paging::mapper::MapToError;
-use x86_64::VirtAddr;
 use crate::allocators::fixed_size_block::FixedSizeBlockAllocator;
+use crate::mem::addr::VirtAddr;
+use crate::mem::mapped_page_table::{FrameAllocator, Mapper, MapToError};
+use crate::mem::page::{Page, Size4KiB};
+use crate::mem::page_table::PageTableFlags;
 
 mod fixed_size_block;
 
@@ -48,7 +49,7 @@ pub fn init_heap(
         Page::range_inclusive(heap_start_page, heap_end_page)
     };
 
-    for page in page_range {
+    for page in page_range { // FIXME: Move this entire thing into the frame allocator and rename it to a page allocator
         let frame = frame_allocator
             .allocate_frame()
             .ok_or(MapToError::FrameAllocationFailed)?;

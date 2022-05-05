@@ -1,15 +1,12 @@
+use core::arch::asm;
+use core::convert::Infallible;
+use core::ops::FromResidual;
 use crate::mem::addr::{PhysAddr, VirtAddr};
 use crate::mem::frame::PhysFrame;
 use crate::mem::page::{Page, PageRangeInclusive, PageSize, Size1GiB, Size2MiB, Size4KiB};
 use crate::mem::page_table::{FrameError, PageTable, PageTableEntry, PageTableFlags, PageTableLevel};
 use crate::mem::paging::level_5_paging;
-use crate::structures::paging::{
-    frame::PhysFrame,
-    frame_alloc::{FrameAllocator, FrameDeallocator},
-    mapper::*,
-    page::{AddressNotAligned, Page, PageRangeInclusive, Size1GiB, Size2MiB, Size4KiB},
-    page_table::{FrameError, PageTable, PageTableEntry, PageTableFlags, PageTableLevel},
-};
+use crate::println;
 
 /// A Mapper implementation that relies on a PhysAddr to VirtAddr conversion function.
 ///
@@ -218,7 +215,13 @@ impl<'a, P: PageTableFrameMapping> Mapper<Size1GiB> for MappedPageTable<'a, P> {
         page: Page<Size1GiB>,
         flags: PageTableFlags,
     ) -> Result<MapperFlush<Size1GiB>, FlagUpdateError> {
-        let p4 = &mut self.level_4_table;
+        let p4 = if level_5_paging() {
+            let p5 = &mut self.top_level_table;
+            self.page_table_walker
+                .next_table_mut(&mut p5[page.p5_index()])?
+        } else {
+            &mut self.top_level_table
+        };
         let p3 = self
             .page_table_walker
             .next_table_mut(&mut p4[page.p4_index()])?;
@@ -271,7 +274,13 @@ impl<'a, P: PageTableFrameMapping> Mapper<Size2MiB> for MappedPageTable<'a, P> {
         &mut self,
         page: Page<Size2MiB>,
     ) -> Result<(PhysFrame<Size2MiB>, MapperFlush<Size2MiB>), UnmapError> {
-        let p4 = &mut self.level_4_table;
+        let p4 = if level_5_paging() {
+            let p5 = &mut self.top_level_table;
+            self.page_table_walker
+                .next_table_mut(&mut p5[page.p5_index()])?
+        } else {
+            &mut self.top_level_table
+        };
         let p3 = self
             .page_table_walker
             .next_table_mut(&mut p4[page.p4_index()])?;
@@ -325,7 +334,13 @@ impl<'a, P: PageTableFrameMapping> Mapper<Size2MiB> for MappedPageTable<'a, P> {
     }
 
     fn translate_page(&self, page: Page<Size2MiB>) -> Result<PhysFrame<Size2MiB>, TranslateError> {
-        let p4 = &self.level_4_table;
+        let p4 = if level_5_paging() {
+            let p5 = &self.top_level_table;
+            self.page_table_walker
+                .next_table(&p5[page.p5_index()])?
+        } else {
+            &self.top_level_table
+        };
         let p3 = self.page_table_walker.next_table(&p4[page.p4_index()])?;
         let p2 = self.page_table_walker.next_table(&p3[page.p3_index()])?;
 
@@ -446,7 +461,7 @@ impl<'a, P: PageTableFrameMapping> Translate for MappedPageTable<'a, P> {
     fn translate(&self, addr: VirtAddr) -> TranslateResult {
         let p4 = if level_5_paging() {
             let p5 = &self.top_level_table;
-            self.page_table_walker.next_table(&p5[page.p5_index()])?
+            self.page_table_walker.next_table(&p5[addr.p5_index()])?
         } else {
             &self.top_level_table
         };
@@ -748,6 +763,53 @@ impl From<FrameError> for PageTableWalkError {
     }
 }
 
+impl From<PageTableWalkError> for MapToError<Size4KiB> {
+    #[inline]
+    fn from(err: PageTableWalkError) -> Self {
+        match err {
+            PageTableWalkError::NotMapped => MapToError::FrameAllocationFailed,
+            PageTableWalkError::MappedToHugePage => MapToError::ParentEntryHugePage,
+        }
+    }
+}
+
+impl From<PageTableWalkError> for MapToError<Size2MiB> {
+    #[inline]
+    fn from(err: PageTableWalkError) -> Self {
+        match err {
+            PageTableWalkError::NotMapped => MapToError::FrameAllocationFailed,
+            PageTableWalkError::MappedToHugePage => MapToError::ParentEntryHugePage,
+        }
+    }
+}
+
+impl From<PageTableWalkError> for MapToError<Size1GiB> {
+    #[inline]
+    fn from(err: PageTableWalkError) -> Self {
+        match err {
+            PageTableWalkError::NotMapped => MapToError::FrameAllocationFailed,
+            PageTableWalkError::MappedToHugePage => MapToError::ParentEntryHugePage,
+        }
+    }
+}
+
+impl FromResidual<Result<Infallible, PageTableWalkError>> for TranslateResult {
+    fn from_residual(residual: Result<Infallible, PageTableWalkError>) -> Self {
+        match residual {
+            Ok(_) => {
+                println!("FROM RISIDUAL ERROR THINGY!");
+                loop {}
+            },
+            Err(err) => {
+                match err {
+                    PageTableWalkError::NotMapped => TranslateResult::NotMapped,
+                    PageTableWalkError::MappedToHugePage => TranslateResult::InvalidFrameAddress(PhysAddr::new(0)), // FIXME: Is this correct?
+                }
+            },
+        }
+    }
+}
+
 impl From<PageTableWalkError> for UnmapError {
     #[inline]
     fn from(err: PageTableWalkError) -> Self {
@@ -791,8 +853,6 @@ pub unsafe trait PageTableFrameMapping {
     /// Translate the given physical frame to a virtual page table pointer.
     fn frame_to_pointer(&self, frame: PhysFrame) -> *mut PageTable;
 }
-
-use crate::structures::paging::{PageSize, PhysFrame};
 
 /// A trait for types that can allocate a frame of memory.
 ///
@@ -1144,15 +1204,21 @@ impl<S: PageSize> MapperFlush<S> {
     }
 
     /// Flush the page from the TLB to ensure that the newest mapping is used.
-    #[cfg(feature = "instructions")]
     #[inline]
     pub fn flush(self) {
-        crate::instructions::tlb::flush(self.0.start_address());
+        flush(self.0.start_address());
     }
 
     /// Don't flush the TLB and silence the “must be used” warning.
     #[inline]
     pub fn ignore(self) {}
+}
+
+#[inline]
+fn flush(addr: VirtAddr) {
+    unsafe {
+        asm!("invlpg [{}]", in(reg) addr.as_u64(), options(nostack, preserves_flags));
+    }
 }
 
 /// This type represents a change of a page table requiring a complete TLB flush
@@ -1301,18 +1367,19 @@ impl<'a> OffsetPageTable<'a> {
     /// of a valid page table hierarchy. Otherwise this function might break memory safety, e.g.
     /// by writing to an illegal memory location.
     #[inline]
-    pub unsafe fn new(level_4_table: &'a mut PageTable, phys_offset: VirtAddr) -> Self {
+    pub unsafe fn new(top_level_table: &'a mut PageTable, phys_offset: VirtAddr) -> Self {
         let phys_offset = PhysOffset {
             offset: phys_offset,
         };
         Self {
-            inner: unsafe { MappedPageTable::new(level_4_table, phys_offset) },
+            inner: unsafe { MappedPageTable::new(top_level_table, phys_offset) },
         }
     }
 
-    /// Returns a mutable reference to the wrapped level 4 `PageTable` instance.
-    pub fn level_4_table(&mut self) -> &mut PageTable {
-        self.inner.level_4_table()
+    /// Returns a mutable reference to the wrapped top level `PageTable` instance.
+    #[inline]
+    pub fn top_level_table(&mut self) -> &mut PageTable {
+        self.inner.top_level_table()
     }
 }
 
@@ -1365,34 +1432,6 @@ impl<'a> Mapper<Size1GiB> for OffsetPageTable<'a> {
     ) -> Result<MapperFlush<Size1GiB>, FlagUpdateError> {
         unsafe { self.inner.update_flags(page, flags) }
     }
-
-    /*
-    #[inline]
-    unsafe fn set_flags_p4_entry(
-        &mut self,
-        page: Page<Size1GiB>,
-        flags: PageTableFlags,
-    ) -> Result<MapperFlushAll, FlagUpdateError> {
-        unsafe { self.inner.set_flags_p4_entry(page, flags) }
-    }
-
-    #[inline]
-    unsafe fn set_flags_p3_entry(
-        &mut self,
-        page: Page<Size1GiB>,
-        flags: PageTableFlags,
-    ) -> Result<MapperFlushAll, FlagUpdateError> {
-        unsafe { self.inner.set_flags_p3_entry(page, flags) }
-    }
-
-    #[inline]
-    unsafe fn set_flags_p2_entry(
-        &mut self,
-        page: Page<Size1GiB>,
-        flags: PageTableFlags,
-    ) -> Result<MapperFlushAll, FlagUpdateError> {
-        unsafe { self.inner.set_flags_p2_entry(page, flags) }
-    }*/
 
     #[inline]
     fn translate_page(&self, page: Page<Size1GiB>) -> Result<PhysFrame<Size1GiB>, TranslateError> {
@@ -1567,4 +1606,3 @@ impl<'a> CleanUp for OffsetPageTable<'a> {
         unsafe { self.inner.clean_up_addr_range(range, frame_deallocator) }
     }
 }
-

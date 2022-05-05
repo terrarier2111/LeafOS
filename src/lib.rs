@@ -13,6 +13,7 @@
 #![feature(int_roundings)]
 #![feature(ptr_metadata)]
 #![feature(adt_const_params)]
+#![feature(try_trait_v2)]
 
 extern crate alloc;
 
@@ -27,7 +28,7 @@ pub mod vga_buffer;
 pub mod interrupts;
 pub mod serial;
 pub mod gdt;
-pub mod memory;
+pub mod memory; // FIXME: Remove this
 pub mod print;
 pub mod events;
 pub mod shell;
@@ -40,7 +41,7 @@ pub mod filesystem;
 pub mod arch;
 pub mod syscall;
 pub mod error_codes;
-mod mem;
+pub mod mem;
 pub mod utils;
 
 pub fn init() {

@@ -3,9 +3,6 @@
 use core::fmt;
 use core::ops::{Index, IndexMut};
 
-use super::{PageSize, PhysFrame, Size4KiB};
-use crate::addr::PhysAddr;
-
 use bitflags::bitflags;
 use crate::mem::addr::PhysAddr;
 use crate::mem::frame::PhysFrame;
