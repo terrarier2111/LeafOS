@@ -41,6 +41,7 @@ pub mod arch;
 pub mod syscall;
 pub mod error_codes;
 mod mem;
+pub mod utils;
 
 pub fn init() {
     gdt::init();
