@@ -7,6 +7,7 @@ use crate::memory;
 // Virtual memory blocks: pages
 // Physical memory blocks: frames
 
+/*
 /// Returns a mutable reference to the active level 4 table.
 ///
 /// This function is unsafe because the caller must guarantee that the
@@ -102,3 +103,5 @@ pub fn setup(memory_map: &'static MemoryMap, physical_memory_offset: u64) -> (Of
     crate::allocators::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
     (mapper, frame_allocator)
+}
+*/

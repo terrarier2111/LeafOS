@@ -1,7 +1,7 @@
 use crate::mem::addr::{PhysAddr, VirtAddr};
 use crate::mem::frame::PhysFrame;
-use crate::mem::mapped_page_table::{FrameAllocator, OffsetPageTable};
-use crate::mem::page_table::PageTable;
+use crate::mem::mapped_page_table::{FrameAllocator, Mapper, MapToError, OffsetPageTable};
+use crate::mem::page_table::{PageTable, PageTableFlags};
 use crate::{println, utils};
 use bitflags::bitflags;
 use bootloader::bootinfo::{MemoryMap, MemoryRegion, MemoryRegionType};
@@ -16,7 +16,7 @@ use intrusive_collections::{LinkedList, SinglyLinkedList};
 use x86::controlregs::{cr4, Cr4};
 use x86::current::paging::{PAddr, PT};
 use x86_64::registers::control::Cr4Flags;
-use crate::mem::page::Size4KiB;
+use crate::mem::page::{Page, Size4KiB};
 
 static mut LEVEL_5_PAGING: bool = false;
 
@@ -75,7 +75,7 @@ unsafe fn curr_top_level_page_table(mem_offset: u64) -> &'static mut PageTable /
 /// `physical_memory_offset`. Also, this function must only be called once
 /// to avoid aliasing `&mut` references (which is undefined behavior).
 pub unsafe fn init(physical_memory_offset: u64) -> OffsetPageTable<'static> {
-    unsafe { LEVEL_5_PAGING = cr4().contains(Cr4::CR4_ENABLE_LA57) };
+    // unsafe { LEVEL_5_PAGING = cr4().contains(Cr4::CR4_ENABLE_LA57) }; // FIXME: Readd this once our used bootloader supports 5 level paging
     let top_level_table = curr_top_level_page_table(physical_memory_offset);
     OffsetPageTable::new(top_level_table, VirtAddr::new(physical_memory_offset))
 }
@@ -99,7 +99,7 @@ impl DefaultFrameAllocator {
     /// This function is unsafe because the caller must guarantee that the passed
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(memory_map: &'static MemoryMap, mapper: &mut OffsetPageTable) -> Self {
         let mut orders = [0; ORDERS]; // FIXME: Do we need to make this static to not dynamically allocate memory
 
         // FIXME: Replace memory_map with our own or the one of stivale2 https://wiki.osdev.org/Detecting_Memory_(x86)
@@ -122,29 +122,60 @@ impl DefaultFrameAllocator {
             None
         }
 
+        let mut setup_alloc: SetupFrameAllocator<4> = SetupFrameAllocator::new(memory_map);
+        println!("pre refill");
+        setup_alloc.refill();
+        println!("post refill");
+
         let mut usable_start = 0;
         let mut last_usable = 0;
 
         // FIXME: Fix the size calculation as not every region is frame sized but we are currently assuming that (probably)
-        for entry in memory_map.iter() {
+        'start: for entry in memory_map.iter() {
+            // println!("got entry!");
             let mut start_frame_number = entry.range.start_frame_number;
             if USABLE_START >= entry.range.start_frame_number * 4096 {
                 if USABLE_START >= entry.range.end_frame_number * 4096 {
+                    // println!("skipping!");
                     continue;
                 }
                 start_frame_number = USABLE_START.div_ceil(4096);
+            }
+            let mut end_frame_number = entry.range.end_frame_number;
+            if LAST_USABLE_FRAMES.start != u64::MAX && LAST_USABLE_FRAMES.end <= end_frame_number {
+                end_frame_number = LAST_USABLE_FRAMES.end - 1;
+            }
+            if LAST_USABLE_FRAMES.start != u64::MAX && LAST_USABLE_FRAMES.end <= start_frame_number {
+                println!("breaking curr: {} other: {} to {} | used {}", start_frame_number, LAST_USABLE_FRAMES.start, LAST_USABLE_FRAMES.end, USED_FRAME_COUNTER);
+                break;
             }
             if entry.region_type == MemoryRegionType::Usable {
                 println!("usable!");
                 if usable_start == 0 {
                     usable_start = start_frame_number;
                 }
-                last_usable = entry.range.end_frame_number;
+
+                for page in start_frame_number..end_frame_number {
+                    // println!("mapping page...");
+                    let frame = setup_alloc
+                        .allocate_frame()
+                        .ok_or::<MapToError<Size4KiB>>(MapToError::FrameAllocationFailed).unwrap(); // FIXME: break 'start when unwrap fails instead of panicking!
+                    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+                    unsafe {
+                        mapper.map_to(Page::from_start_address(VirtAddr::new(page * 4096)).unwrap(), frame, flags, &mut setup_alloc).unwrap().flush() // FIXME: break 'start when unwrap fails instead of panicking!
+                    };
+                    setup_alloc.refill();
+                    // println!("mapped page!");
+                }
+                println!("post paging!");
+
+                last_usable = end_frame_number;
             } else if usable_start != 0 {
                 println!("unusable!");
                 // FIXME: Try using free mem range if possible
                 let usable_end = last_usable;
                 // let usable_mem = (entry.range.start_addr() - 1) - usable_start;
+
                 while let Some(order) = find_matching_order(/*&mut req_mem, */usable_end - usable_start/*, found_orders*/) {
                     // let extra_mem = usable_mem - (1 << order);
                     // extra frames we can leave as they are
@@ -193,36 +224,50 @@ impl DefaultFrameAllocator {
         println!("test 5");
 
         // FIXME: Fix the size calculation as not every region is frame sized but we are currently assuming that (probably)
-        if usable_start != 0 {
+        if usable_start != 0 { // FIXME: IMPORTANT: (06.05.22: FIX THIS ENTIRE CODE BLOCK BY USING THE CODE BLOCK ABOVE AS A REFERENCE!)
+            println!("unusable!");
+            // FIXME: Try using free mem range if possible
+            let usable_end = last_usable;
             // let usable_mem = (entry.range.start_addr() - 1) - usable_start;
-            let usable_frames = last_usable - usable_start; // FIXME: Somehow generate these!
-            while let Some(order) = find_matching_order(/*&mut req_mem, */usable_frames/*, found_orders*/) {
-                /*let extra_mem = usable_mem - (1 << order);
+
+            while let Some(order) = find_matching_order(/*&mut req_mem, */usable_end - usable_start/*, found_orders*/) {
+                // let extra_mem = usable_mem - (1 << order);
                 // extra frames we can leave as they are
-                let extra_frames = extra_mem.div_floor(4096);
+                // let extra_frames = usable_end - usable_start/*extra_mem.div_floor(4096)*/;
 
                 // range of memory which should be checked when marking frames as free later on depending on if the start address
                 // of them is included in these ranges or not, tho this memory range will be reduced because it includes the frames
                 // we want to ommit because we have too much free memory.
-                let max_mem_range = usable_start..(entry.range.start_addr() - 4096);
+                /*let max_mem_range = usable_start..(entry.range.start_addr() - 4096);
                 let used_mem_range = max_mem_range.start..(max_mem_range.end - (extra_frames * 4096));
                 let used_end = used_mem_range.end;
                 /*order_maps[order] = BitMap::new(ptr::from_exposed_addr_mut(used_mem_range.start as usize) as &'static mut [u64]);
                 used.borrow_mut().push_front(used_mem_range);
                 found_orders |= (1 << order);
                 if found_orders == final_orders {
-                    break;
+                    break 'start;
                 }*/
                 usable_start = used_end + 4096;*/
                 let entry_addr = usable_start as usize;
 
-                if orders[order] != 0 {
-                    let entry = orders[order] * 4096;
-                    Self::write_entry_prev::<false>(entry, entry_addr);
-                }
-                let prev = orders[order];
+                println!("unusable 1");
+                let prev = orders[order] * 4096;
                 orders[order] = entry_addr;
-                Self::write_entry_next::<true>(entry_addr, prev);
+                let entry_addr = entry_addr * 4096;
+                if prev != 0 {
+                    Self::write_entry_prev::<false>(prev, entry_addr);
+                    println!("unusable 2");
+                }
+                Self::write_entry_next::<false>(entry_addr, prev);
+                println!("unusable 2.1\nentry addr: {}", entry_addr);
+                println!("unusable 3");
+
+                if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr as u64), order).as_u64() as usize) {
+                    println!("unusable 4");
+                    Self::set_entry_has_neighbor(entry_addr);
+                }
+
+                println!("unusable 5");
 
                 // FIXME: Insert into correct list :c
                 usable_start += 1 << order;
@@ -387,32 +432,41 @@ impl DefaultFrameAllocator {
 
         let entry = self.orders[curr_order] * 4096;
 
+        println!("alloc 0");
+
         // retrieve next entry and update its metadata
         let next_entry = Self::entry_next_ptr(entry);
         self.orders[curr_order] = next_entry.expose_addr() / 4096;
-        Self::write_entry_prev::<false>(next_entry.expose_addr(), 0);
+        if !next_entry.is_null() {
+            Self::write_entry_prev::<false>(next_entry.expose_addr(), 0);
+        }
+
+        println!("alloc 1");
+        // FIXME: Somewhere between this and the "alloc 7" debug is a BUG - FIX IT!
 
         // Split up the buddy until we have the desired size
         while curr_order > order {
             curr_order -= 1;
             let other = split_buddy(entry, curr_order + 1);
-            let prev_head = self.orders[curr_order];
-            Self::write_entry_next::<false>(other, prev_head);
-            Self::write_entry_prev::<false>(other, 0);
+            // let prev_head = self.orders[curr_order]; // FIXME: this should always be 0 right?
+            Self::write_entry_next::<true>(other, 0/*prev_head*/);
+            Self::write_entry_prev::<true>(other, 0);
             self.orders[curr_order] = other / 4096; // convert into internal repr and replace current list head
-            Self::write_entry_prev::<true>(prev_head, other);
+            // Self::write_entry_prev::<false>(prev_head, other);
             // FIXME: Handle buddy we want to use - THIS IS PROBABLY ALREADY DONE!
         }
+
+        println!("alloc 7");
 
         // FIXME: Remove bitmap and do used checks based on the values of prev and next (if they are 0)
         Some(PhysAddr::new(entry as u64))
     }
 
-    fn deallocate_frame(&mut self, address: PhysAddr) {
+    pub fn deallocate_frame(&mut self, address: PhysAddr) {
         self.deallocate_frames(address, 0);
     }
 
-    fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
+    pub fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
         Self::free_entry(address.as_u64() as usize);
         let mut new_order = order;
         while MAX_ORDER > order {
@@ -431,6 +485,76 @@ unsafe impl FrameAllocator<Size4KiB> for DefaultFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.inner_allocate_frame()
     }
+}
+
+static mut USED_FRAME_COUNTER: usize = 0;
+static mut LAST_USABLE_FRAMES: Range<u64> = u64::MAX..u64::MAX;
+
+struct SetupFrameAllocator<const ENTRIES: usize> {
+    frames: [u64; ENTRIES],
+    next: usize,
+    memory_map: &'static MemoryMap,
+}
+
+unsafe impl<const ENTRIES: usize> FrameAllocator<Size4KiB> for SetupFrameAllocator<ENTRIES> {
+    fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
+        if self.next >= ENTRIES {
+            return None;
+        }
+        let ret = self.frames[self.next];
+        self.next += 1;
+        unsafe { USED_FRAME_COUNTER += 1 };
+        Some(PhysFrame::from_start_address(PhysAddr::new((ret * 4096) as u64)).unwrap())
+    }
+}
+
+impl<const ENTRIES: usize> SetupFrameAllocator<ENTRIES> {
+
+    #[inline]
+    fn new(memory_map: &'static MemoryMap) -> Self {
+        Self {
+            frames: [0; ENTRIES],
+            next: ENTRIES,
+            memory_map
+        }
+    }
+
+    fn refill(&mut self) {
+        if self.next != 0 {
+            let usable_frames = unsafe { LAST_USABLE_FRAMES.clone() };
+            if (usable_frames.end - usable_frames.start) < self.next as u64 {
+                for frame in usable_frames.rev() {
+                    self.frames[self.next - 1] = frame;
+                    self.next -= 1;
+                }
+                // FIXME: Find next usable frame range!
+                let mut last_range = u64::MAX..u64::MAX;
+                for entry in self.memory_map.iter() {
+                    if entry.region_type == MemoryRegionType::Usable {
+                        //  println!("inner range: {} to {}", entry.range.start_frame_number, entry.range.end_frame_number);
+                    }
+
+                    if entry.region_type == MemoryRegionType::Usable && entry.range.end_frame_number < unsafe { LAST_USABLE_FRAMES.start }
+                    && (entry.range.start_frame_number > last_range.end || last_range.start == u64::MAX) {
+                        last_range = entry.range.start_frame_number..entry.range.end_frame_number;
+                        println!("inner range: {} to {}", entry.range.start_frame_number, entry.range.end_frame_number);
+                    }
+                }
+                println!("found range: {}", last_range.clone().start);
+                unsafe { LAST_USABLE_FRAMES = last_range };
+
+                // call refill again to refill the missing frames which couldn't be refilled in this run
+                self.refill();
+            } else {
+                for frame in ((usable_frames.end - self.next as u64)..usable_frames.end).rev() {
+                    self.frames[self.next - 1] = frame;
+                }
+                unsafe { LAST_USABLE_FRAMES.end -= self.next as u64 };
+                self.next = 0;
+            }
+        }
+    }
+
 }
 
 /// Conceptually this represents splitting a parent buddy into two smaller ones (children)

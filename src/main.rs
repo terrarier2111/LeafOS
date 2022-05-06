@@ -40,8 +40,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("Initialization succeeded!");
 
     let (table, mut allocator) = mem::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
-    println!("allocating test thingy!");
-    let test_page = allocator.allocate_frame().unwrap();
+    /*println!("allocating test thingy!");
+    let test_page = allocator.allocate_frame().unwrap();*/
 
     hlt_loop();
     scheduler::init();
