@@ -27,6 +27,7 @@ pub fn setup(
     let test2_frame = frame_allocator.allocate_frame();
     println!("frame2: {}", test2_frame.is_some());
     frame_allocator.deallocate_frame(test2_frame.unwrap().start_address);
+    frame_allocator.deallocate_frame(test_frame.unwrap().start_address);
     println!("cleaned up!");
     /*crate::allocators::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
