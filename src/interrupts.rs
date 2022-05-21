@@ -216,19 +216,33 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    // FIXME: see here: https://www.kernel.org/doc/html/latest/admin-guide/mm/userfaultfd.html
     use x86_64::registers::control::Cr2;
+    const KERNEL_ADDRESS_SPACE_START: u64 = 1_u64 << 62; // FIXME: Use a real value here, not just some random number!
+
+    let accessed_addr = Cr2::read_raw();
 
     println!("EXCEPTION: PAGE FAULT");
-    println!("Accessed Address: {:?}", Cr2::read());
+    println!("Accessed Address: {:?}", accessed_addr);
     println!("Error Code: {:?}", error_code.clone());
     println!("Raw Error code: {}", unsafe { transmute::<PageFaultErrorCode, u64>(error_code) });
     println!("{:#?}", stack_frame);
+
+    // FIXME: Update page table entries of userspace if the fault occurred in userspace and some other criteria are met
+    if accessed_addr >= KERNEL_ADDRESS_SPACE_START || accessed_addr == 0 {
+        // FIXME: SIGNAL THE USER PROCESS A SIGSEGV and KILL it afterwards.
+        println!("tried to do stuff in kernel address space or tried to dereference a null pointer!");
+        hlt_loop();
+    }
+
+
     hlt_loop();
 }
 
 extern "x86-interrupt" fn apic_timer_config_handler(
     _stack_frame: InterruptStackFrame)
 {
+    // FIXME: Sometimes this gets called before apic is setup, FIX THIS!
     TRIGGERED_ONCE.store(true, Ordering::SeqCst);
     unsafe { LAPIC.as_mut().unwrap().end_of_interrupt(); }
 }

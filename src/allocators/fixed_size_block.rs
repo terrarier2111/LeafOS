@@ -3,6 +3,7 @@ use core::{mem, ptr};
 use core::ptr::NonNull;
 use crate::allocators::Locked;
 
+/*
 struct ListNode {
     next: Option<&'static mut ListNode>,
 }
@@ -101,4 +102,4 @@ unsafe impl GlobalAlloc for Locked<FixedSizeBlockAllocator> {
             }
         }
     }
-}
+}*/

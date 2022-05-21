@@ -39,17 +39,23 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     println!("Initialization succeeded!");
 
-    let (table, mut allocator) = mem::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
+    /*let (table/*, mut allocator*/) = */mem::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
     /*println!("allocating test thingy!");
     let test_page = allocator.allocate_frame().unwrap();*/
 
-    hlt_loop();
+    // hlt_loop();
+    println!("initing scheduler!");
     scheduler::init();
+    println!("initing apic!");
     unsafe { init_apic(boot_info.physical_memory_offset); }
+    println!("initing pit!");
     pit::init();
+    println!("starting timer!");
     LeafOS::interrupts::start_timer_one_shot(SCHEDULER_TIMER_DELAY);
 
+    println!("starting processes!");
     scheduler::start_proc(test_fn, true);
+    println!("starting second process!");
     scheduler::start_proc(test_fn_hello, true);
 
     #[cfg(test)]

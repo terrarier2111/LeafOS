@@ -45,12 +45,30 @@ fn _handle_write(fd: usize, msg: *const u8, msg_len: usize) -> usize {
     }
 }
 
-fn exit(args: &mut SyscallArgs) {
+fn handle_exit(args: &mut SyscallArgs) {
+    _handle_exit(args.arg0);
+}
+
+fn _handle_exit(code: usize) {
 
 }
 
-fn _exit(code: usize) {
+fn handle_mmap(args: &mut SyscallArgs) {
+    let result = _handle_write(args.arg0, args.arg1 as *mut _, args.arg2);
+    args.error = result;
+}
 
+fn _handle_mmap(start: *mut u8, length: usize) -> usize {
+    0
+}
+
+fn handle_munmap(args: &mut SyscallArgs) {
+    let result = _handle_munmap(args.arg0 as *mut _, args.arg1);
+    args.error = result;
+}
+
+fn _handle_munmap(start: *mut u8, length: usize) -> usize {
+    0
 }
 
 pub unsafe extern "C" fn do_syscall_0(syscall_id: usize) -> usize {
@@ -138,3 +156,5 @@ pub unsafe extern "C" fn do_syscall_6(syscall_id: usize, arg0: usize, arg1: usiz
 }
 
 pub const WRITE: usize = 1;
+pub const MMAP: usize = 2;
+pub const MUNMAP: usize = 3;

@@ -2,7 +2,7 @@ use crate::mem::addr::{PhysAddr, VirtAddr};
 use crate::mem::frame::PhysFrame;
 use crate::mem::mapped_page_table::{FrameAllocator, Mapper, MapToError, OffsetPageTable};
 use crate::mem::page_table::{PageTable, PageTableFlags};
-use crate::{println, utils};
+use crate::{print, println, utils, wait_for_interrupt};
 use bitflags::bitflags;
 use bootloader::bootinfo::{MemoryMap, MemoryRegion, MemoryRegionType};
 use core::arch::asm;
@@ -13,6 +13,7 @@ use core::ops::{BitAnd, BitAndAssign, BitOrAssign, Range, Shl, Shr};
 use core::ptr;
 use core::ptr::slice_from_raw_parts;
 use intrusive_collections::{LinkedList, SinglyLinkedList};
+use spin::Mutex;
 use x86::controlregs::{cr4, Cr4};
 use x86::current::paging::{PAddr, PT};
 use x86_64::registers::control::Cr4Flags;
@@ -80,8 +81,7 @@ const ORDERS: usize = MAX_ORDER + 1;
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 #[repr(C)]
-pub struct DefaultFrameAllocator {
-    memory_map: &'static MemoryMap,
+pub struct BuddyFrameAllocator {
     map_offset: usize, // the offset in memory from 0 to where the frame allocator info is located at
     orders: [usize; ORDERS], // represents a list of addresses (in the compressed order format described below)
 }
@@ -91,13 +91,14 @@ const USABLE_START: u64 = 1 * 1024 * 1024; // 1MB
 // TODO: Instead of saving the frame data at the start of each frame itself, just have some frames at the beginning, which can be inserted into the paging structure
 // TODO: and which can be used to save the frame information of all other frames in the system.
 
-impl DefaultFrameAllocator {
+impl BuddyFrameAllocator {
     /// Create a FrameAllocator from the passed memory map.
     ///
     /// This function is unsafe because the caller must guarantee that the passed
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
-    pub unsafe fn init(memory_map: &'static MemoryMap, mapper: &mut OffsetPageTable) -> Self {
+    pub unsafe fn init(memory_map: &'static MemoryMap, mapper: &Mutex<OffsetPageTable>) -> Self {
+        let mut mapper = mapper.lock();
         let mut orders = [0; ORDERS];
         // FIXME: Replace memory_map with our own or the one of stivale2 https://wiki.osdev.org/Detecting_Memory_(x86)
 
@@ -112,6 +113,7 @@ impl DefaultFrameAllocator {
 
         let mut setup_alloc: SetupFrameAllocator<3> = SetupFrameAllocator::new(memory_map);
 
+        // find the highest frame
         let mut highest_frame = 0;
         for entry in memory_map.iter() {
             if entry.region_type == MemoryRegionType::Usable && entry.range.end_frame_number > highest_frame {
@@ -120,6 +122,7 @@ impl DefaultFrameAllocator {
         }
         let required_frames = (highest_frame * 10).div_ceil(4096);
 
+        // find an appropriate space to put our mapping data into
         let map_dest = {
             let mut ret = 0..0;
             for entry in memory_map.iter() {
@@ -141,8 +144,10 @@ impl DefaultFrameAllocator {
         };
         if map_dest.end == 0 {
             // FIXME: Return error and report to user
+            panic!("Initial paging setup error!");
         }
 
+        // put our mapping data into the space we allocated
         for page in map_dest.clone() {
             setup_alloc.refill();
             let frame: PhysFrame<Size4KiB> = PhysFrame::from_start_address(PhysAddr::new(page * 4096)).unwrap();
@@ -193,14 +198,19 @@ impl DefaultFrameAllocator {
 
                     let prev = orders[order] * 4096;
                     orders[order] = entry_addr;
+                    println!("inserting: {} | order: {}", entry_addr * 4096, order);
+                    for _ in 0..10000/*00*/ {
+                        print!("");
+                    }
                     let entry_addr = entry_addr * 4096;
                     if prev != 0 {
-                        Self::write_entry_prev::<false>(map_offset, prev, entry_addr);
+                        // Self::write_entry_prev::<false>(map_offset, prev, entry_addr); // FIXME: when writing no prevs, it works and getting prev just gives us next
                     }
                     Self::write_entry_next::<false>(map_offset, entry_addr, prev);
+                    // Self::write_entry_prev::<true>(map_offset, entry_addr, 0);
 
                     if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr as u64), order).as_u64() as usize) {
-                        Self::set_entry_has_neighbor(map_offset, entry_addr);
+                       // Self::set_entry_has_neighbor(map_offset, entry_addr);
                     }
 
                     usable_start += 1 << order;
@@ -210,13 +220,14 @@ impl DefaultFrameAllocator {
         }
 
         // FIXME: Fix the size calculation as not every region is frame sized but we are currently assuming that (probably)
-        if usable_start != 0 {
+        /*if usable_start != 0 {
             // FIXME: Try using free mem range if possible
             while let Some(order) = find_matching_order(last_usable - usable_start) {
                 // range of memory which should be checked when marking frames as free later on depending on if the start address
                 // of them is included in these ranges or not, tho this memory range will be reduced because it includes the frames
                 // we want to ommit because we have too much free memory.
                 let entry_addr = usable_start as usize;
+                println!("ins {} to {}", entry_addr * 4096, order);
 
                 let prev = orders[order] * 4096;
                 orders[order] = entry_addr;
@@ -225,6 +236,7 @@ impl DefaultFrameAllocator {
                     Self::write_entry_prev::<false>(map_offset, prev, entry_addr);
                 }
                 Self::write_entry_next::<false>(map_offset, entry_addr, prev);
+                // Self::write_entry_prev::<true>(map_offset, entry_addr, 0); // FIXME: This causes all entries to not have a next element - WHY?
 
                 if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr as u64), order).as_u64() as usize) {
                     Self::set_entry_has_neighbor(map_offset, entry_addr);
@@ -232,7 +244,7 @@ impl DefaultFrameAllocator {
 
                 usable_start += 1 << order;
             }
-        }
+        }*/
 
         // One pointer to the next free page inside each page suffices (for allocation) because to remove an allocated page from its parent
         // we simply do 2 next calls and mutate the page we get from the first next call to point to the 2nd page's successor
@@ -259,8 +271,47 @@ impl DefaultFrameAllocator {
         // 1 bit: flag whether or not this page has an usable neighbor
         // 39 bits: prev entry data
         // 1 bit: unused, reserved for future usage
+        /*loop {
+            wait_for_interrupt();
+        }*/
 
-        Self { memory_map, map_offset: map_dest.start as usize * 4096, orders }
+        for order in 0..ORDERS {
+            // println!("order: {} | x: {:?}", x.0, PhysAddr::new(*x.1 as u64));
+            let mut tmp = orders[order] * 4096;
+            let mut counter = 0;
+            while tmp != 0 && counter < 10 {
+                let next = Self::entry_next_ptr(map_offset, tmp);
+                let dst = map_offset + (tmp.div_floor(4096) * 10);
+                let metadata_part = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
+                let prev = Self::entry_prev_ptr(map_offset, tmp);
+                println!("cnt: {} | order: {} | curr: {} | next: {:?} | nxt_raw: {} | prev_raw {}", counter, order, tmp, next.expose_addr(), metadata_part, prev.expose_addr());
+                /*if metadata_part == 0 && tmp != 0 {
+                    println!("other: {}", )
+                    loop {
+                        wait_for_interrupt();
+                    }
+                }*/
+                tmp = next.expose_addr();
+                counter += 1;
+                for _ in 0..10000/*00*/ {
+                    print!("");
+                }
+            }
+        }
+
+        loop {
+            wait_for_interrupt();
+        }
+
+        Self { map_offset, orders }
+    }
+
+    #[inline]
+    pub const fn invalid() -> Self {
+        Self {
+            map_offset: 0,
+            orders: [0; ORDERS],
+        }
     }
 
     fn entry_next_ptr(map_offset: usize, entry_addr: usize) -> *mut u8 {
@@ -269,6 +320,17 @@ impl DefaultFrameAllocator {
         let metadata_part = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
         let link = (metadata_part & MASK) * 4096;
         link as *mut u8
+    }
+
+    fn entry_next_raw<const ORDER_ENTRY: bool>(map_offset: usize, raw_entry_addr: usize) -> usize {
+        let dst = map_offset + (raw_entry_addr * 10);
+        const MASK: usize = (1 << 39) - 1; // the 39 lower bits are set
+        let metadata_part = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
+        if ORDER_ENTRY {
+            metadata_part
+        } else {
+            metadata_part & MASK
+        }
     }
 
     #[inline]
@@ -283,10 +345,10 @@ impl DefaultFrameAllocator {
 
     fn entry_meta_first(map_offset: usize, entry_addr: usize) -> usize {
         let dst = map_offset + (entry_addr.div_floor(4096) * 10);
-        const MASK: usize = 1 << 40;
+        const MASK: usize = 1 << 39;
         let metadata_part = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
         let meta = metadata_part & MASK;
-        meta >> 40
+        meta >> 39
     }
 
     #[inline]
@@ -307,11 +369,10 @@ impl DefaultFrameAllocator {
     #[inline]
     fn write_entry_meta_first(map_offset: usize, entry_addr: usize, val: bool) {
         let dst = map_offset + (entry_addr.div_floor(4096) * 10);
-        const MASK_OFFSET: usize = 40;
         let metadata_part = unsafe { &mut *ptr::from_exposed_addr_mut(dst) as &mut usize };
         let val = unsafe { transmute::<bool, u8>(val) } as usize;
-        *metadata_part |= val << 40;
-        *metadata_part &= !(val << 4);
+        *metadata_part |= val << 39;
+        *metadata_part &= !(val << 39);
     }
 
     #[inline(always)]
@@ -322,7 +383,7 @@ impl DefaultFrameAllocator {
     #[inline]
     fn set_entry_meta_first(map_offset: usize, entry_addr: usize) {
         let dst = map_offset + (entry_addr.div_floor(4096) * 10);
-        const MASK: usize = 1 << 40;
+        const MASK: usize = 1 << 39;
         let metadata_part = unsafe { &mut *ptr::from_exposed_addr_mut(dst) as &mut usize };
         *metadata_part |= MASK;
     }
@@ -330,20 +391,56 @@ impl DefaultFrameAllocator {
     fn write_entry_next<const RAW: bool>(map_offset: usize, entry_addr: usize, next_entry_addr: usize) {
         let dst = map_offset + (entry_addr.div_floor(4096) * 10);
         let metadata_part = {
-            let mut tmp = if RAW {
+            let mut base = if RAW {
                 next_entry_addr
             } else {
                 next_entry_addr / 4096
             };
-            unsafe { tmp | ((((*(&*ptr::from_exposed_addr(dst + 4) as &u32)) >> 7) as usize) << 39) } // only keep the last 3 bytes (and one bit extra metadata)
+            // let meta = unsafe { *(&*ptr::from_exposed_addr(dst + 4) as &u32) };
+            // base | (((meta >> 7) as usize) << 39) // only keep the last 3 bytes (and one bit extra metadata)
+            // const MASK: usize = !((1 << 39) - 1);
+            // let meta = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
+            // (meta & MASK) | base
+            const MASK: u32 = !(u8::MAX as u32);
+            let meta = unsafe { *(&*ptr::from_exposed_addr(dst + 4) as &u32) }; // skip the first four bytes as they only contain the old address
+            let meta = (meta & MASK) as usize; // skip the fifth byte using masking as it only contains the old address
+            let meta = meta << 32; // skip the first 32 bits as they should only contain zeros (our first 8 bits already contain zeros, so we shift 32 instead of 40)
+            // FIXME: there is a bug in here! we have to retain the metadata bit! (maybe there are other bugs in here)
+            meta | base
         };
-        let metadata_part_addr = unsafe { &mut *ptr::from_exposed_addr_mut(dst) as &mut usize };
-        *metadata_part_addr = metadata_part;
+        println!("to_fin: {} | value: {} final_val: {}", dst, next_entry_addr, metadata_part);
+        // let metadata_part_addr = unsafe { &mut *ptr::from_exposed_addr_mut(dst) as &mut usize };
+        unsafe { ptr::write_volatile::<usize>(ptr::from_exposed_addr_mut(dst), metadata_part); }
+        // *metadata_part_addr = metadata_part;
     }
 
     #[inline]
     fn write_entry_prev<const RAW: bool>(map_offset: usize, entry_addr: usize, prev_entry_addr: usize) {
         Self::write_entry_next::<RAW>(map_offset, entry_addr + 5, prev_entry_addr)
+       /* let entry_addr = entry_addr + 5;
+        let dst = map_offset + (entry_addr.div_floor(4096) * 10);
+        let metadata_part = {
+            let mut base = if RAW {
+                prev_entry_addr
+            } else {
+                prev_entry_addr / 4096
+            };
+            // let meta = unsafe { *(&*ptr::from_exposed_addr(dst + 4) as &u32) };
+            // base | (((meta >> 7) as usize) << 39) // only keep the last 3 bytes (and one bit extra metadata)
+            // const MASK: usize = !((1 << 39) - 1);
+            // let meta = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
+            // (meta & MASK) | base
+            const MASK: u32 = !(u8::MAX as u32);
+            let meta = unsafe { *(&*ptr::from_exposed_addr(dst + 4) as &u32) }; // skip the first four bytes as they only contain the old address
+            let meta = (meta & MASK) as usize; // skip the fifth byte using masking as it only contains the old address
+            let meta = meta << 32; // skip the first 32 bits as they should only contain zeros (our first 8 bits already contain zeros, so we shift 32 instead of 40)
+            // FIXME: there is a bug in here! we have to retain the metadata bit! (maybe there are other bugs in here)
+            meta | base
+        };
+        println!("to_fin: {} | value: {} final_val: {}", dst, next_entry_addr, metadata_part);
+        // let metadata_part_addr = unsafe { &mut *ptr::from_exposed_addr_mut(dst) as &mut usize };
+        unsafe { ptr::write_volatile::<usize>(ptr::from_exposed_addr_mut(dst), metadata_part); }*/
+        // *metadata_part_addr = metadata_part;
     }
 
     fn is_free(map_offset: usize, entry_addr: usize) -> bool {
@@ -371,7 +468,11 @@ impl DefaultFrameAllocator {
         self.allocate_frames(0).map(|addr| PhysFrame::containing_address(addr))
     }
 
-    fn allocate_frames(&mut self, order: usize) -> Option<PhysAddr> {
+    pub fn allocate_frames(&mut self, order: usize) -> Option<PhysAddr> {
+        // FIXME: Current issues: for some reason EVERY order only has 2 true entries but they point to another sequence of these same entries, almost indefinitely
+        // FIXME: so either we are inserting incorrect values (at setup time) or we are reading them wrongly
+        // FIXME: Its probably at time of writing that the issue occours as reading the raw 64 bits located at the expected memory location reveals that there are only 2
+        // FIXME: different values there
         let mut curr_order = order;
         while MAX_ORDER > curr_order && self.orders[curr_order] == 0 {
             curr_order += 1;
@@ -390,6 +491,7 @@ impl DefaultFrameAllocator {
         }
 
         // Split up the buddy until we have the desired size
+        // FIXME: Maybe there is a bug in this loop which allows to allocate a frame twice
         while curr_order > order {
             curr_order -= 1;
             let other = split_buddy(entry, curr_order + 1);
@@ -398,11 +500,24 @@ impl DefaultFrameAllocator {
             self.orders[curr_order] = other / 4096; // convert into internal repr and replace current list head
         }
 
+        println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry as u64), curr_order, order);
+
         Some(PhysAddr::new(entry as u64))
     }
 
     pub fn deallocate_frame(&mut self, address: PhysAddr) {
+        println!("deallocated frame: {:?}", address);
         self.deallocate_frames(address, 0);
+    }
+
+    pub fn order_from_size(size: usize) -> usize {
+        let frames = size.div_ceil(4096);
+        for i in 0..ORDERS {
+            if (1 << i) > frames {
+                return i;
+            }
+        }
+        MAX_ORDER
     }
 
     pub fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
@@ -416,10 +531,25 @@ impl DefaultFrameAllocator {
             Self::free_entry(self.map_offset, other_buddy.as_u64() as usize);
             new_order += 1;
         }
+        // FIXME: Actually fix deallocation!
     }
 }
 
-unsafe impl FrameAllocator<Size4KiB> for DefaultFrameAllocator {
+// FIXME: Try switching to using this struct instead of manually doing bit and pointer magic every time we need to modify stuff
+/*
+#[repr(C)]
+struct MapEntry {
+    first_data: u64,
+    second_data: u16,
+}
+
+impl MapEntry {
+
+    fn write_first(&mut self)
+
+}*/
+
+unsafe impl FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     #[inline]
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.inner_allocate_frame()

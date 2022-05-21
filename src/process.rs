@@ -16,6 +16,16 @@ impl Process {
         self.id
     }
 
+    // FIXME: should the signaling methods even be in here?
+    pub fn send_signal(&self, signal_id: u32) { // FIXME: should we use usize/u64?
+        // FIXME: Call signal handler!
+    }
+
+    /// Send a real-time signal
+    pub fn send_signal_rt(&self, signal_id: u32, payload: u32) { // FIXME: should we use usize/u64?
+        todo!()
+    }
+
 }
 
 #[repr(u8)]
