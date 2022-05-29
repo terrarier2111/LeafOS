@@ -1,20 +1,20 @@
+use crate::mem::addr::{PhysAddr, VirtAddr};
+use crate::mem::frame::PhysFrame;
+use crate::mem::mapped_page_table::Mapper;
+use crate::mem::page::{Page, Size4KiB};
+use crate::mem::page_table::PageTableFlags;
+use crate::mem::paging::BuddyFrameAllocator;
+use crate::mem::{FRAME_ALLOCATOR, MAPPER, PHYSICAL_MEMORY_OFFSET};
+use crate::println;
 use alloc::sync::Arc;
 use core::alloc::{GlobalAlloc, Layout};
-use core::mem::{MaybeUninit, transmute};
+use core::mem::{transmute, MaybeUninit};
 use core::ops::DerefMut;
 use core::ptr;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 use slabmalloc::{AllocationError, Allocator, LargeObjectPage, ObjectPage, ZoneAllocator};
 use spin::Mutex;
-use crate::mem::addr::{PhysAddr, VirtAddr};
-use crate::mem::{FRAME_ALLOCATOR, MAPPER, PHYSICAL_MEMORY_OFFSET};
-use crate::mem::frame::PhysFrame;
-use crate::mem::mapped_page_table::Mapper;
-use crate::mem::page::{Page, Size4KiB};
-use crate::mem::page_table::PageTableFlags;
-use crate::mem::paging::BuddyFrameAllocator;
-use crate::println;
 
 /// To use a ZoneAlloactor we require a lower-level allocator
 /// (not provided by this crate) that can supply the allocator
@@ -29,30 +29,48 @@ impl Pager {
 
     /// Allocates a given `page_size`.
     fn alloc_page(&self, page_size: usize) -> Option<*mut u8> {
-        let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames(BuddyFrameAllocator::order_from_size(page_size)) };
+        // FIXME: map multiple pages
+        let order = BuddyFrameAllocator::order_from_size(page_size);
+        let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames(order) };
 
         if let Some(frame) = &frame {
-            let mut frame_allocator = unsafe { FRAME_ALLOCATOR.lock() };
-            let mut frame_allocator = frame_allocator.deref_mut();
+            for fc in 0..(1 << order) {
+                let mut frame_allocator = unsafe { FRAME_ALLOCATOR.lock() };
+                let mut frame_allocator = frame_allocator.deref_mut();
 
-            let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-            let mut mapper = MAPPER.lock();
-            let page: Page<Size4KiB> = Page::from_start_address(VirtAddr::new(frame.as_u64())).unwrap();
-            let phys_frame: PhysFrame<Size4KiB> = PhysFrame::from_start_address(frame.clone()).unwrap();
-            unsafe {
-                mapper.map_to::<BuddyFrameAllocator>(page,
-                              phys_frame, flags, frame_allocator).unwrap().flush()
-            };
+                let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+                let mut mapper = MAPPER.lock();
+                let page: Page<Size4KiB> =
+                    Page::from_start_address(VirtAddr::new(frame.as_u64() + (fc as u64 * 4096))).unwrap();
+                println!("mapped: {:?}", VirtAddr::new(frame.as_u64() + (fc as u64 * 4096)));
+                let phys_frame: PhysFrame<Size4KiB> =
+                    PhysFrame::from_start_address(frame.clone() + (fc as u64 * 4096)).unwrap();
+                unsafe {
+                    mapper
+                        .map_to::<BuddyFrameAllocator>(page, phys_frame, flags, frame_allocator)
+                        .unwrap()
+                        .flush()
+                };
+            }
         }
 
-        frame.map(|x| ptr::from_exposed_addr_mut((x.as_u64()/* + PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed)*/) as usize))
+        frame.map(|x| {
+            ptr::from_exposed_addr_mut(
+                (x.as_u64()/* + PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed)*/) as usize,
+            )
+        })
     }
 
     /// De-allocates a given `page_size`.
     fn dealloc_page(&self, ptr: *mut u8, page_size: usize) {
         // FIXME: do we translate smth?
         println!("deallocing!");
-        unsafe { FRAME_ALLOCATOR.lock().deallocate_frames(PhysAddr::new(ptr.expose_addr() as u64), BuddyFrameAllocator::order_from_size(page_size)) };
+        unsafe {
+            FRAME_ALLOCATOR.lock().deallocate_frames(
+                PhysAddr::new(ptr.expose_addr() as u64),
+                BuddyFrameAllocator::order_from_size(page_size),
+            )
+        };
     }
 
     /// Allocates a new ObjectPage from the System.
@@ -168,9 +186,7 @@ unsafe impl GlobalAlloc for SafeZoneAllocator {
 }
 
 impl SafeZoneAllocator {
-
     pub const fn new() -> Self {
         Self(Mutex::new(ZoneAllocator::new()))
     }
-
 }

@@ -11,7 +11,7 @@ use core::cmp::Ordering;
 use core::mem::{size_of, transmute};
 use core::ops::{BitAnd, BitAndAssign, BitOrAssign, Range, Shl, Shr};
 use core::ptr;
-use core::ptr::slice_from_raw_parts;
+use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts};
 use intrusive_collections::{LinkedList, SinglyLinkedList};
 use spin::Mutex;
 use x86::controlregs::{cr4, Cr4};
@@ -196,21 +196,31 @@ impl BuddyFrameAllocator {
                     // we want to ommit because we have too much free memory.
                     let entry_addr = usable_start as usize;
 
-                    let prev = orders[order] * 4096;
+                    // let prev = orders[order] * 4096;
+                    let mut prev = Self::entry_glob((orders[order] * 4096) as u64, map_offset);
                     orders[order] = entry_addr;
-                    println!("inserting: {} | order: {}", entry_addr * 4096, order);
+                    /*println!("inserting: {} | order: {}", entry_addr * 4096, order);
                     for _ in 0..10000/*00*/ {
                         print!("");
-                    }
-                    let entry_addr = entry_addr * 4096;
-                    if prev != 0 {
+                    }*/
+                    // let entry_addr = entry_addr * 4096;
+                    let entry_addr = Self::entry_glob((entry_addr * 4096) as u64, map_offset);
+                    let entry_addr_raw = entry_addr.expose_addr();
+                    let entry_addr = entry_addr.as_mut().unwrap();
+                    if !prev.is_null() {
+                        let prev = prev.as_mut().unwrap();
+                        prev.set_prev(entry_addr, map_offset);
                         // Self::write_entry_prev::<false>(map_offset, prev, entry_addr); // FIXME: when writing no prevs, it works and getting prev just gives us next
                     }
-                    Self::write_entry_next::<false>(map_offset, entry_addr, prev);
+                    entry_addr.set_next(prev, map_offset);
+                    entry_addr.set_prev(ptr::null_mut(), map_offset);
+                    // Self::write_entry_next::<false>(map_offset, entry_addr, prev);
                     // Self::write_entry_prev::<true>(map_offset, entry_addr, 0);
 
-                    if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr as u64), order).as_u64() as usize) {
-                       // Self::set_entry_has_neighbor(map_offset, entry_addr);
+                    if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr_raw as u64), order).as_u64() as usize, order + 1) {
+                        // FIXME: Does this check for the entire range or just for a single frame? - COULDN'T WE JUST CHECK HOW MANY FRAMES ARE STILL USABLE TO DETERMINE IF THE BUDDY IS USABLE?
+                        // Self::set_entry_has_neighbor(map_offset, entry_addr);
+                        entry_addr.set_has_neighbor();
                     }
 
                     usable_start += 1 << order;
@@ -220,31 +230,45 @@ impl BuddyFrameAllocator {
         }
 
         // FIXME: Fix the size calculation as not every region is frame sized but we are currently assuming that (probably)
-        /*if usable_start != 0 {
+        if usable_start != 0 {
             // FIXME: Try using free mem range if possible
             while let Some(order) = find_matching_order(last_usable - usable_start) {
+
                 // range of memory which should be checked when marking frames as free later on depending on if the start address
                 // of them is included in these ranges or not, tho this memory range will be reduced because it includes the frames
                 // we want to ommit because we have too much free memory.
                 let entry_addr = usable_start as usize;
-                println!("ins {} to {}", entry_addr * 4096, order);
 
-                let prev = orders[order] * 4096;
+                // let prev = orders[order] * 4096;
+                let mut prev = Self::entry_glob((orders[order] * 4096) as u64, map_offset);
                 orders[order] = entry_addr;
-                let entry_addr = entry_addr * 4096;
-                if prev != 0 {
-                    Self::write_entry_prev::<false>(map_offset, prev, entry_addr);
+                /*println!("inserting: {} | order: {}", entry_addr * 4096, order);
+                for _ in 0..10000/*00*/ {
+                    print!("");
+                }*/
+                // let entry_addr = entry_addr * 4096;
+                let entry_addr = Self::entry_glob((entry_addr * 4096) as u64, map_offset);
+                let entry_addr_raw = entry_addr.expose_addr();
+                let entry_addr = entry_addr.as_mut().unwrap();
+                if !prev.is_null() {
+                    let prev = prev.as_mut().unwrap();
+                    prev.set_prev(entry_addr, map_offset);
+                    // Self::write_entry_prev::<false>(map_offset, prev, entry_addr); // FIXME: when writing no prevs, it works and getting prev just gives us next
                 }
-                Self::write_entry_next::<false>(map_offset, entry_addr, prev);
-                // Self::write_entry_prev::<true>(map_offset, entry_addr, 0); // FIXME: This causes all entries to not have a next element - WHY?
+                entry_addr.set_next(prev, map_offset);
+                entry_addr.set_prev(ptr::null_mut(), map_offset);
+                // Self::write_entry_next::<false>(map_offset, entry_addr, prev);
+                // Self::write_entry_prev::<true>(map_offset, entry_addr, 0);
 
-                if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr as u64), order).as_u64() as usize) {
-                    Self::set_entry_has_neighbor(map_offset, entry_addr);
+                if memory_map.is_usable(other_buddy(PhysAddr::new(entry_addr_raw as u64), order).as_u64() as usize, order + 1) {
+                    // FIXME: Does this check for the entire range or just for a single frame? - COULDN'T WE JUST CHECK HOW MANY FRAMES ARE STILL USABLE TO DETERMINE IF THE BUDDY IS USABLE?
+                    // Self::set_entry_has_neighbor(map_offset, entry_addr);
+                    entry_addr.set_has_neighbor();
                 }
 
                 usable_start += 1 << order;
             }
-        }*/
+        }
 
         // One pointer to the next free page inside each page suffices (for allocation) because to remove an allocated page from its parent
         // we simply do 2 next calls and mutate the page we get from the first next call to point to the 2nd page's successor
@@ -275,33 +299,41 @@ impl BuddyFrameAllocator {
             wait_for_interrupt();
         }*/
 
-        for order in 0..ORDERS {
+        /*for order in 0..ORDERS {
             // println!("order: {} | x: {:?}", x.0, PhysAddr::new(*x.1 as u64));
-            let mut tmp = orders[order] * 4096;
+            let mut tmp = Self::entry_glob((orders[order] * 4096) as u64, map_offset);
             let mut counter = 0;
-            while tmp != 0 && counter < 10 {
-                let next = Self::entry_next_ptr(map_offset, tmp);
-                let dst = map_offset + (tmp.div_floor(4096) * 10);
-                let metadata_part = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
-                let prev = Self::entry_prev_ptr(map_offset, tmp);
-                println!("cnt: {} | order: {} | curr: {} | next: {:?} | nxt_raw: {} | prev_raw {}", counter, order, tmp, next.expose_addr(), metadata_part, prev.expose_addr());
+            while !tmp.is_null() && counter < 10 {
+                // println!("test! 1");
+                let stmp = tmp.as_mut().unwrap();
+                // println!("test! 2");
+                let curr_raw = stmp.assoc_page(map_offset).expose_addr();
+                let next = stmp.get_next(map_offset);
+                let next_raw = next.as_mut().map_or(0, |x| x.assoc_page(map_offset).expose_addr());
+                let prev = stmp.get_prev(map_offset).as_mut().map_or(0, |x| x.assoc_page(map_offset).expose_addr());
+                // let next = Self::entry_next_ptr(map_offset, tmp);
+                // let dst = map_offset + (tmp.div_floor(4096) * 10);
+                // let metadata_part = unsafe { *(&*ptr::from_exposed_addr(dst) as &usize) };
+                // let prev = Self::entry_prev_ptr(map_offset, tmp);
+                println!("cnt: {} | order: {} | curr: {} | next: {:?} | prev_raw {}", counter, order, curr_raw, next_raw, /*metadata_part, */prev);
                 /*if metadata_part == 0 && tmp != 0 {
                     println!("other: {}", )
                     loop {
                         wait_for_interrupt();
                     }
                 }*/
-                tmp = next.expose_addr();
+                tmp = next;
                 counter += 1;
-                for _ in 0..10000/*00*/ {
+                /*for _ in 0..10000/*00*/ {
                     print!("");
-                }
+                }*/
             }
         }
 
-        loop {
+        println!("size: {} | align: {}", size_of::<MapEntry>(), core::mem::align_of::<MapEntry>());*/
+        /*loop {
             wait_for_interrupt();
-        }
+        }*/
 
         Self { map_offset, orders }
     }
@@ -311,6 +343,24 @@ impl BuddyFrameAllocator {
         Self {
             map_offset: 0,
             orders: [0; ORDERS],
+        }
+    }
+
+    /// Safety:
+    /// `page_address` has to be a valid address to an unused page in memory.
+    unsafe fn entry(&self, page_address: u64) -> *mut MapEntry {
+        Self::entry_glob(page_address, self.map_offset)
+    }
+
+    /// Safety:
+    /// `page_address` has to be a valid address to an unused page in memory.
+    fn entry_glob(page_address: u64, map_offset: usize) -> *mut MapEntry {
+        if page_address != 0 {
+            let meta_addr = map_offset + (page_address.div_floor(4096) * 10) as usize; // FIXME: we probably gotta subtract the mapoffset somewhere - DO THAT!
+            ptr::from_exposed_addr_mut::<MapEntry>(meta_addr)
+        } else {
+            println!("got zero param in entry func!");
+            ptr::null_mut()
         }
     }
 
@@ -481,28 +531,43 @@ impl BuddyFrameAllocator {
             return None;
         }
 
-        let entry = self.orders[curr_order] * 4096;
+        let entry_raw = self.orders[curr_order] * 4096;
+        let entry = unsafe { self.entry(entry_raw as u64).as_mut().unwrap() };
 
         // retrieve next entry and update its metadata
-        let next_entry = Self::entry_next_ptr(self.map_offset, entry);
-        self.orders[curr_order] = next_entry.expose_addr() / 4096;
+        // let next_entry = Self::entry_next_ptr(self.map_offset, entry);
+        let next_entry = entry.get_next(self.map_offset);
         if !next_entry.is_null() {
-            Self::write_entry_prev::<true>(self.map_offset, next_entry.expose_addr(), 0);
+            self.orders[curr_order] = unsafe { next_entry.as_mut().unwrap().assoc_page(self.map_offset).expose_addr() / 4096 };
+        } else {
+            self.orders[curr_order] = 0;
+        }
+        if !next_entry.is_null() {
+            // Self::write_entry_prev::<true>(self.map_offset, next_entry.expose_addr(), 0);
+            let next_entry = unsafe { next_entry.as_mut().unwrap() };
+            next_entry.set_prev(ptr::null_mut(), self.map_offset);
         }
 
         // Split up the buddy until we have the desired size
         // FIXME: Maybe there is a bug in this loop which allows to allocate a frame twice
         while curr_order > order {
             curr_order -= 1;
-            let other = split_buddy(entry, curr_order + 1);
-            Self::write_entry_next::<true>(self.map_offset, other, 0);
-            Self::write_entry_prev::<true>(self.map_offset, other, 0);
-            self.orders[curr_order] = other / 4096; // convert into internal repr and replace current list head
+            let other_raw = other_buddy(PhysAddr::new(entry_raw as u64), curr_order).as_u64() as usize/*split_buddy(entry_raw, curr_order)*/;
+            let other = unsafe { self.entry(other_raw as u64).as_mut().unwrap() };
+            // Self::write_entry_next::<true>(self.map_offset, other, 0);
+            // Self::write_entry_prev::<true>(self.map_offset, other, 0);
+            other.free();
+            println!("other: {} | order: {} | dist: {}", other_raw, curr_order, entry_raw.abs_diff(other_raw));
+            self.orders[curr_order] = other_raw / 4096; // convert into internal repr and replace current list head
         }
 
-        println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry as u64), curr_order, order);
+        println!("other test: {}", other_buddy(PhysAddr::new(entry_raw as u64), 1).as_u64());
 
-        Some(PhysAddr::new(entry as u64))
+        // FIXME: The issue here is that we are returning the same address which we are storing
+        println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry_raw as u64), curr_order, order);
+        println!("curr_val: {} | ret {}", self.orders[order] * 4096, entry_raw);
+
+        Some(PhysAddr::new(entry_raw as u64))
     }
 
     pub fn deallocate_frame(&mut self, address: PhysAddr) {
@@ -521,14 +586,22 @@ impl BuddyFrameAllocator {
     }
 
     pub fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
-        Self::free_entry(self.map_offset, address.as_u64() as usize);
+        println!("deallocating!");
+        let entry = unsafe { self.entry(address.as_u64()).as_mut().unwrap() }; // FIXME: do some sanity checking!
+        entry.free();
+        // Self::free_entry(self.map_offset, address.as_u64() as usize);
         let mut new_order = order;
         while MAX_ORDER > order {
-            let other_buddy = other_buddy(address, order);
-            if !Self::entry_has_neighbor(self.map_offset, address.as_u64() as usize) || !Self::is_free(self.map_offset, other_buddy.as_u64() as usize) {
+            let other_buddy = other_buddy(address, order).as_u64();
+            let other_buddy = unsafe { self.entry(other_buddy).as_mut().unwrap() };
+            /*if !Self::entry_has_neighbor(self.map_offset, address.as_u64() as usize) || !Self::is_free(self.map_offset, other_buddy.as_u64() as usize) {
+                break;
+            }*/
+            if !entry.has_neighbor() || !other_buddy.is_free() {
                 break;
             }
-            Self::free_entry(self.map_offset, other_buddy.as_u64() as usize);
+            other_buddy.free();
+            // Self::free_entry(self.map_offset, other_buddy.as_u64() as usize);
             new_order += 1;
         }
         // FIXME: Actually fix deallocation!
@@ -536,8 +609,9 @@ impl BuddyFrameAllocator {
 }
 
 // FIXME: Try switching to using this struct instead of manually doing bit and pointer magic every time we need to modify stuff
-/*
-#[repr(C)]
+// #[align(1)] // FIXME: Is this actually the most optimal way of aligning the data?
+// #[repr(C, packed(2))]
+#[repr(C, packed(1))]
 struct MapEntry {
     first_data: u64,
     second_data: u16,
@@ -545,9 +619,84 @@ struct MapEntry {
 
 impl MapEntry {
 
-    fn write_first(&mut self)
+    /// `next` should be a 'normal' address
+    fn set_next(&mut self, next: *mut MapEntry, map_offset: usize) {
+        const EXTRA_DATA_MASK: u64 = !((1 << 39) - 1);
+        let next = if !next.is_null() {
+            (next.expose_addr() - map_offset) as u64
+        } else {
+            0
+        };
+        let other = self.first_data & EXTRA_DATA_MASK;
+        self.first_data = next.div_floor(10/*4096*/) | other;
+    }
 
-}*/
+    fn set_prev(&mut self, prev: *mut MapEntry, map_offset: usize) {
+        const FIRST_EXTRA_DATA_MASK: u64 = (1 << 40) - 1; // the bits from 1 to 40
+        const SECOND_EXTRA_DATA_MASK: u16 = 1 << 15; // the 16th bit
+        const PREV_DATA_FIRST_MASK: u64 = (1 << 24) - 1; // the bits from 1 to 24
+        const PREV_DATA_SECOND_MASK: u64 = ((1 << 15) - 1) << 24; // the bits from 25 to 39
+
+        let prev = if !prev.is_null() {
+            (prev.expose_addr() - map_offset) as u64
+        } else {
+            0
+        };
+        // FIXME: Try improving the performance of this using raw pointers! (if this actually works)
+        let prev = prev.div_floor(10/*4096*/); // FIXME: There is probably a fatal flaw in how we do divisions and multiplications with 4096 and 10
+        let other = self.first_data & FIRST_EXTRA_DATA_MASK;
+        self.first_data = ((prev & PREV_DATA_FIRST_MASK) << 40) | other;
+        let other = self.second_data & SECOND_EXTRA_DATA_MASK;
+        self.second_data = ((prev & PREV_DATA_SECOND_MASK) >> 24) as u16 | other;
+    }
+
+    fn get_next(&self, map_offset: usize) -> *mut MapEntry {
+        const MASK: u64 = (1 << 39) - 1;
+        let raw = (self.first_data & MASK) as usize * 10;
+        if raw != 0 {
+            ptr::from_exposed_addr_mut::<MapEntry>(map_offset + raw)
+        } else {
+            ptr::null_mut()
+        }
+    }
+
+    fn get_prev(&self, map_offset: usize) -> *mut MapEntry {
+        const FIRST_DATA_MASK: u64 = !((1 << 40) - 1); // the bits from 41 to 64
+        const SECOND_DATA_MASK: u16 = (1 << 15) - 1; // the bits from 1 to 15
+        let first = (self.first_data & FIRST_DATA_MASK) >> 40;
+        let second = (self.second_data & SECOND_DATA_MASK) as u64;
+        let raw = (first | (second << 24)) as usize * 10;
+        if raw != 0 {
+            ptr::from_exposed_addr_mut::<MapEntry>(map_offset + raw)
+        } else {
+            ptr::null_mut()
+        }
+    }
+
+    fn set_has_neighbor(&mut self) {
+        const MASK: u64 = 1 << 39;
+        self.first_data |= MASK;
+    }
+
+    fn has_neighbor(&self) -> bool {
+        const MASK: u64 = 1 << 39;
+        (self.first_data & MASK) != 0
+    }
+
+    fn free(&mut self) {
+        self.first_data = 0;
+        self.second_data = 0;
+    }
+
+    fn is_free(&self) -> bool {
+        self.first_data == 0 && self.second_data == 0
+    }
+
+    fn assoc_page(&self, map_offset: usize) -> *mut u8 {
+        ptr::from_exposed_addr_mut::<u8>((addr_of!(self.first_data).expose_addr() - map_offset) / 10 * 4096)
+    }
+
+}
 
 unsafe impl FrameAllocator<Size4KiB> for BuddyFrameAllocator {
     #[inline]
@@ -618,25 +767,29 @@ impl<const ENTRIES: usize> SetupFrameAllocator<ENTRIES> {
 
 }
 
+/*
 /// Conceptually this represents splitting a parent buddy into two smaller ones (children)
 /// This function returns the address of the upper buddy, the lower buddy
 /// is located at `base`.
 ///
-/// `order` is the order of the parent buddy
+/// `order` is the order of the two buddies
 #[inline]
 fn split_buddy(base: usize, order: usize) -> usize {
-    base + (2 << (order - 1))
-}
+    base + (2 << order)
+}*/
 
-/// `order` is the order of the child (probably - CHECK THIS!)
+/// `order` is the order of each buddy (probably - CHECK THIS!)
 fn other_buddy(curr_buddy: PhysAddr, order: usize) -> PhysAddr {
+    // FIXME: Maybe this doesn't get the other buddy properly!
     let buddy_size = 4096_u64 * (1 << order);
     let base = curr_buddy.align_down(buddy_size * 2);
 
     if base == curr_buddy {
+        println!("added");
         curr_buddy + buddy_size
     } else {
-        curr_buddy
+        println!("didn't add");
+        base
     }
 }
 
@@ -644,15 +797,20 @@ fn other_buddy(curr_buddy: PhysAddr, order: usize) -> PhysAddr {
 
 trait MemoryMapFunctions {
 
-    fn is_usable(&self, addr: usize) -> bool;
+    fn is_usable(&self, addr: usize, frames: usize) -> bool;
 
 }
 
 impl MemoryMapFunctions for MemoryMap {
-    fn is_usable(&self, addr: usize) -> bool {
+    fn is_usable(&self, addr: usize, frames: usize) -> bool {
         let regions = unsafe { &*slice_from_raw_parts(self.as_ptr(), 64) as &[MemoryRegion] };
         let idx = search_length_limited_nearest(regions, addr as u64 / 4096, regions.len());
-        regions[idx].region_type == MemoryRegionType::Usable
+        for x in 0..frames {
+            if regions[idx + x].region_type != MemoryRegionType::Usable {
+                return false;
+            }
+        }
+        true
     }
 }
 
