@@ -177,8 +177,7 @@ unsafe impl GlobalAlloc for SafeZoneAllocator {
 
                 // A proper reclamation strategy could be implemented here
                 // to release empty pages back from the ZoneAllocator to the PAGER
-                // FIXME: do we have to do smth here?
-                println!("do dealloc?");
+                PAGER.dealloc_page(ptr, layout.size());
             }
             _ => unimplemented!("Can't handle it, probably needs another allocator."),
         }
