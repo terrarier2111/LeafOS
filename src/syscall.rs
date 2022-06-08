@@ -155,6 +155,9 @@ pub unsafe extern "C" fn do_syscall_6(syscall_id: usize, arg0: usize, arg1: usiz
     result
 }
 
+// FIXME: Adjust these numbers to linux syscall abi numbers if possible
+pub const READ: usize = 0;
 pub const WRITE: usize = 1;
 pub const MMAP: usize = 2;
 pub const MUNMAP: usize = 3;
+pub const EXIT: usize = 4;

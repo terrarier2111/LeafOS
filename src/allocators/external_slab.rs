@@ -1,6 +1,6 @@
 use crate::mem::addr::{PhysAddr, VirtAddr};
 use crate::mem::frame::PhysFrame;
-use crate::mem::mapped_page_table::Mapper;
+use crate::mem::mapped_page_table::{Mapper, Translate};
 use crate::mem::page::{Page, Size4KiB};
 use crate::mem::page_table::PageTableFlags;
 use crate::mem::paging::BuddyFrameAllocator;
@@ -31,9 +31,9 @@ impl Pager {
     fn alloc_page(&self, page_size: usize) -> Option<*mut u8> {
         // FIXME: map multiple pages
         let order = BuddyFrameAllocator::order_from_size(page_size);
-        let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames(order) };
+        let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames_tlb(order) };
 
-        if let Some(frame) = &frame {
+        /*if let Some(frame) = &frame {
             for fc in 0..(1 << order) {
                 let mut frame_allocator = unsafe { FRAME_ALLOCATOR.lock() };
                 let mut frame_allocator = frame_allocator.deref_mut();
@@ -52,7 +52,7 @@ impl Pager {
                         .flush()
                 };
             }
-        }
+        }*/
 
         frame.map(|x| {
             ptr::from_exposed_addr_mut(

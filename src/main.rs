@@ -16,6 +16,7 @@ use x86::syscall;
 use LeafOS::{hlt_loop, mem, memory, println, scheduler};
 use LeafOS::drivers::pit;
 use LeafOS::interrupts::init_apic;
+use LeafOS::mem::FRAME_ALLOCATOR;
 use LeafOS::mem::mapped_page_table::FrameAllocator;
 use LeafOS::scheduler::SCHEDULER_TIMER_DELAY;
 use LeafOS::syscall::{do_syscall_3, STDOUT_FD, WRITE};
@@ -54,9 +55,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     LeafOS::interrupts::start_timer_one_shot(SCHEDULER_TIMER_DELAY);
 
     println!("starting processes!");
-    scheduler::start_proc(test_fn, true);
+    // scheduler::start_proc(test_fn, true);
     println!("starting second process!");
-    scheduler::start_proc(test_fn_hello, true);
+    // scheduler::start_proc(test_fn_hello, true);
 
     #[cfg(test)]
     test_main();
@@ -83,6 +84,19 @@ fn test_fn() {
 fn test_fn_hello() {
     loop {
         println!("HELLO");
+    }
+}
+
+fn test_alloc() {
+    static mut COUNTER: usize = 10000;
+    if unsafe { COUNTER } > 10000 {
+        unsafe { COUNTER = 0; }
+        let mut alloc = unsafe { FRAME_ALLOCATOR.lock() }; // FIXME: alloc and dealloc frame!
+        // let frame = alloc.allocate_frame().unwrap();
+        let frame = alloc.allocate_frames_tlb(0).unwrap();
+        alloc.deallocate_frame(frame);
+    } else {
+        unsafe { COUNTER += 1; }
     }
 }
 

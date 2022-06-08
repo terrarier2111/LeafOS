@@ -16,6 +16,7 @@ pub mod page_table;
 pub mod frame;
 pub mod page;
 pub mod mapped_page_table;
+pub mod heap;
 
 pub static mut FRAME_ALLOCATOR: Mutex<BuddyFrameAllocator> = Mutex::new(BuddyFrameAllocator::invalid());
 lazy_static! {

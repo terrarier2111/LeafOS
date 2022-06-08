@@ -17,6 +17,7 @@ use spin::Mutex;
 use x86::controlregs::{cr4, Cr4};
 use x86::current::paging::{PAddr, PT};
 use x86_64::registers::control::Cr4Flags;
+use crate::mem::MAPPER;
 use crate::mem::page::{Page, Size4KiB};
 
 static mut LEVEL_5_PAGING: bool = false; // FIXME: Don't make this static mut, this was just out of laziness (make this an AtomicBool)
@@ -83,6 +84,7 @@ const ORDERS: usize = MAX_ORDER + 1;
 #[repr(C)]
 pub struct BuddyFrameAllocator {
     map_offset: usize, // the offset in memory from 0 to where the frame allocator info is located at
+    last_pgt_entry: usize, // the last page which is contained in the page table
     orders: [usize; ORDERS], // represents a list of addresses (in the compressed order format described below)
 }
 
@@ -292,15 +294,40 @@ impl BuddyFrameAllocator {
         // 39 bits: next entry data
         // 1 bit: flag whether or not this page has an usable neighbor
         // 39 bits: prev entry data
-        // 1 bit: unused, reserved for future usage
+        // 1 bit: flag whether the current page is the first entry (of the two bodies) or not
+/*
+        for order in 0..ORDERS {
+            let mut tmp = ptr::null_mut();
+            let mut current = Self::entry_glob((orders[order] * 4096) as u64, map_offset);
 
-        Self { map_offset, orders }
+            /* swap next and prev for all nodes of
+             doubly linked list */
+            while !current.is_null() {
+                let derefed_current = unsafe {&mut *current };
+                tmp = derefed_current.get_prev(map_offset);
+                let new_prev = derefed_current.get_next(map_offset);
+                derefed_current.set_prev(new_prev, map_offset);
+                derefed_current.set_next(tmp, map_offset);
+                current = new_prev;
+            }
+
+            /* Before changing head, check for the cases like
+             empty list and list with only one node */
+            if !tmp.is_null() {
+                let prev = unsafe { &mut *tmp }.get_prev(map_offset);
+                orders[order] = unsafe { &mut *prev }.assoc_page(map_offset).expose_addr() / 4096;
+            }
+        }*/
+
+
+        Self { map_offset, last_pgt_entry: map_offset, orders }
     }
 
     #[inline]
     pub const fn invalid() -> Self {
         Self {
             map_offset: 0,
+            last_pgt_entry: 0,
             orders: [0; ORDERS],
         }
     }
@@ -500,13 +527,11 @@ impl BuddyFrameAllocator {
         }
 
         // Split up the buddy until we have the desired size
-        // FIXME: Maybe there is a bug in this loop which allows to allocate a frame twice
         while curr_order > order {
             curr_order -= 1;
             let buddy_size = 4096 * (1 << curr_order);
             let other = unsafe { &mut *self.entry((entry_raw + buddy_size) as u64) };
             other.free();
-            other.set_has_neighbor();
             println!("other: {} | order: {} | dist: {}", other.assoc_page(self.map_offset).expose_addr(), curr_order, entry_raw.abs_diff(other.assoc_page(self.map_offset).expose_addr()));
             self.orders[curr_order] = other.assoc_page(self.map_offset).expose_addr() / 4096; // convert into internal repr and replace current list head
         }
@@ -518,6 +543,40 @@ impl BuddyFrameAllocator {
         println!("curr_val: {} | ret {}", self.orders[order] * 4096, entry_raw);
 
         Some(PhysAddr::new(entry_raw as u64))
+    }
+
+    // FIXME: FOUND UNSOUNDNESS: when creating a local of type Option<mut POINTER> and then calling unwrap_unchecked we get issues
+    // FIXME: SOMETHING LIKE THIS BUT VOLATILE:
+    /*
+        let mut tmp = None;
+        tmp = Some(ptr::null_mut());
+        tmp.unwrap();
+     */
+
+    pub fn allocate_frames_tlb(&mut self, order: usize) -> Option<PhysAddr> {
+        let frames = self.allocate_frames(order);
+        let curr_start = frames.map_or(0, |x| x.as_u64() / 4096);
+        let curr_end = curr_start + (1 << order);
+        if curr_end > self.last_pgt_entry as u64 {
+            for fc in (self.last_pgt_entry + 1)..(curr_end as usize + 1) { // FIXME: is here some off by one error?
+                let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+                let mut mapper = MAPPER.lock();
+                let page: Page<Size4KiB> =
+                    Page::from_start_address(VirtAddr::new(fc as u64 * 4096)).unwrap();
+                println!("mapped: {:?}", VirtAddr::new(fc as u64 * 4096));
+                let phys_frame: PhysFrame<Size4KiB> =
+                    PhysFrame::from_start_address(PhysAddr::new(fc as u64 * 4096)).unwrap();
+                unsafe {
+                    mapper
+                        .map_to::<BuddyFrameAllocator>(page, phys_frame, flags, self)
+                        .unwrap()
+                        .flush()
+                };
+            }
+        }
+        // self.last_pgt_entry = (curr_end - 1) as usize; // FIXME: is here some off by one error?
+        self.last_pgt_entry = curr_end as usize; // FIXME: is here some off by one error?
+        frames
     }
 
     pub fn deallocate_frame(&mut self, address: PhysAddr) {
@@ -538,22 +597,38 @@ impl BuddyFrameAllocator {
     pub fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
         // FIXME: FIX THIS METHOD - CURRENTLY IT DOESN'T WORK AT ALL!
         println!("deallocating!");
-        let entry = unsafe { self.entry(address.as_u64()).as_mut().unwrap() }; // FIXME: do some sanity checking!
-        entry.free();
+        let entry_raw = unsafe { self.entry(address.as_u64()) };
+        let entry = unsafe { entry_raw.as_mut().unwrap() }; // FIXME: do some sanity checking!
         // Self::free_entry(self.map_offset, address.as_u64() as usize);
+        entry.free();
         let mut new_order = order;
         while MAX_ORDER > order {
-            let other_buddy = other_buddy(address, order).as_u64();
-            let other_buddy = unsafe { self.entry(other_buddy).as_mut().unwrap() };
+            if !entry.has_neighbor()/* || !other_buddy.is_free()*/ {
+                break;
+            }
+            let offset = 4096 * (1 << order);
+            // let other_buddy = other_buddy(address, order).as_u64();
+            let other_addr = if entry.is_first() {
+                address.as_u64() + offset
+            } else {
+                address.as_u64() - offset
+            };
+            let other_buddy = unsafe { self.entry(other_addr).as_mut().unwrap() };
             /*if !Self::entry_has_neighbor(self.map_offset, address.as_u64() as usize) || !Self::is_free(self.map_offset, other_buddy.as_u64() as usize) {
                 break;
             }*/
-            if !entry.has_neighbor() || !other_buddy.is_free() {
+            if !other_buddy.is_free() {
                 break;
             }
-            other_buddy.free();
             // Self::free_entry(self.map_offset, other_buddy.as_u64() as usize);
             new_order += 1;
+        }
+        let next = self.orders[new_order] * 4096;
+        self.orders[new_order] = entry.assoc_page(self.map_offset).expose_addr() / 4096;
+        let next = unsafe { self.entry(next as u64) };
+        if !next.is_null() {
+            entry.set_next(next, self.map_offset);
+            unsafe { &mut *next }.set_prev(entry_raw, self.map_offset);
         }
         // FIXME: Actually fix deallocation!
     }
@@ -645,12 +720,16 @@ impl MapEntry {
     }
 
     fn free(&mut self) {
-        self.first_data = 0;
-        self.second_data = 0;
+        const FIRST_MASK: u64 = 1 << 39;
+        const SECOND_MASK: u16 = 1 << 15;
+        self.first_data &= FIRST_MASK;
+        self.second_data &= SECOND_MASK;
     }
 
     fn is_free(&self) -> bool {
-        self.first_data == 0 && self.second_data == 0
+        const FIRST_MASK: u64 = !(1 << 39);
+        const SECOND_MASK: u16 = !(1 << 15);
+        (self.first_data & FIRST_MASK) == 0 && (self.second_data & SECOND_MASK) == 0
     }
 
     fn assoc_page(&self, map_offset: usize) -> *mut u8 {
