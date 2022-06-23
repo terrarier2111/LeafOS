@@ -84,7 +84,6 @@ const ORDERS: usize = MAX_ORDER + 1;
 #[repr(C)]
 pub struct BuddyFrameAllocator {
     map_offset: usize, // the offset in memory from 0 to where the frame allocator info is located at
-    last_pgt_entry: usize, // the last page which is contained in the page table
     orders: [usize; ORDERS], // represents a list of addresses (in the compressed order format described below)
 }
 
@@ -320,21 +319,20 @@ impl BuddyFrameAllocator {
         }*/
 
 
-        Self { map_offset, last_pgt_entry: map_offset, orders }
+        Self { map_offset, orders }
     }
 
     #[inline]
     pub const fn invalid() -> Self {
         Self {
             map_offset: 0,
-            last_pgt_entry: 0,
             orders: [0; ORDERS],
         }
     }
 
     /// Safety:
     /// `page_address` has to be a valid address to an unused page in memory.
-    unsafe fn entry(&self, page_address: u64) -> *mut MapEntry {
+    fn entry(&self, page_address: u64) -> *mut MapEntry {
         Self::entry_glob(page_address, self.map_offset)
     }
 
@@ -502,6 +500,12 @@ impl BuddyFrameAllocator {
         self.allocate_frames(0).map(|addr| PhysFrame::containing_address(addr))
     }
 
+    /// This function allows for allocating frames larger than MAX_ORDER
+    fn allocate_large_frames(&mut self, order: usize) -> Option<PhysAddr> {
+        // FIXME: we can iterate here and such, cuz large allocations don't have as strict perf requirements as smaller/medium ones
+        todo!()
+    }
+
     pub fn allocate_frames(&mut self, order: usize) -> Option<PhysAddr> {
         let mut curr_order = order;
         while MAX_ORDER > curr_order && self.orders[curr_order] == 0 {
@@ -553,32 +557,6 @@ impl BuddyFrameAllocator {
         tmp.unwrap();
      */
 
-    pub fn allocate_frames_tlb(&mut self, order: usize) -> Option<PhysAddr> {
-        let frames = self.allocate_frames(order);
-        let curr_start = frames.map_or(0, |x| x.as_u64() / 4096);
-        let curr_end = curr_start + (1 << order);
-        if curr_end > self.last_pgt_entry as u64 {
-            for fc in (self.last_pgt_entry + 1)..(curr_end as usize + 1) { // FIXME: is here some off by one error?
-                let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-                let mut mapper = MAPPER.lock();
-                let page: Page<Size4KiB> =
-                    Page::from_start_address(VirtAddr::new(fc as u64 * 4096)).unwrap();
-                println!("mapped: {:?}", VirtAddr::new(fc as u64 * 4096));
-                let phys_frame: PhysFrame<Size4KiB> =
-                    PhysFrame::from_start_address(PhysAddr::new(fc as u64 * 4096)).unwrap();
-                unsafe {
-                    mapper
-                        .map_to::<BuddyFrameAllocator>(page, phys_frame, flags, self)
-                        .unwrap()
-                        .flush()
-                };
-            }
-        }
-        // self.last_pgt_entry = (curr_end - 1) as usize; // FIXME: is here some off by one error?
-        self.last_pgt_entry = curr_end as usize; // FIXME: is here some off by one error?
-        frames
-    }
-
     pub fn deallocate_frame(&mut self, address: PhysAddr) {
         println!("deallocated frame: {:?}", address);
         self.deallocate_frames(address, 0);
@@ -592,6 +570,14 @@ impl BuddyFrameAllocator {
             }
         }
         MAX_ORDER
+    }
+
+    /// This function allows for deallocating frames larger than MAX_ORDER
+    ///
+    /// Safety:
+    /// This should be kernel internal (or we somehow have to ensure that no pages are freed incorrectly)
+    pub unsafe fn deallocate_frames_large(&mut self, address: PhysAddr, order: usize) {
+        todo!()
     }
 
     pub fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {

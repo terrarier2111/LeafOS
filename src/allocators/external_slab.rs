@@ -31,9 +31,10 @@ impl Pager {
     fn alloc_page(&self, page_size: usize) -> Option<*mut u8> {
         // FIXME: map multiple pages
         let order = BuddyFrameAllocator::order_from_size(page_size);
-        let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames_tlb(order) };
+        let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames(order) };
 
-        /*if let Some(frame) = &frame {
+        // FIXME: use a heap instead of inserting pages into the TLB every time we allocate them
+        if let Some(frame) = &frame {
             for fc in 0..(1 << order) {
                 let mut frame_allocator = unsafe { FRAME_ALLOCATOR.lock() };
                 let mut frame_allocator = frame_allocator.deref_mut();
@@ -52,7 +53,7 @@ impl Pager {
                         .flush()
                 };
             }
-        }*/
+        }
 
         frame.map(|x| {
             ptr::from_exposed_addr_mut(
