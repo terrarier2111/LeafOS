@@ -9,7 +9,7 @@ use core::arch::asm;
 use core::borrow::{Borrow, BorrowMut};
 use core::cmp::Ordering;
 use core::mem::{size_of, transmute};
-use core::ops::{BitAnd, BitAndAssign, BitOrAssign, Range, Shl, Shr};
+use core::ops::{BitAnd, BitAndAssign, BitOrAssign, DerefMut, Range, Shl, Shr};
 use core::ptr;
 use core::ptr::{addr_of, addr_of_mut, slice_from_raw_parts};
 use intrusive_collections::{LinkedList, SinglyLinkedList};
@@ -17,7 +17,7 @@ use spin::Mutex;
 use x86::controlregs::{cr4, Cr4};
 use x86::current::paging::{PAddr, PT};
 use x86_64::registers::control::Cr4Flags;
-use crate::mem::MAPPER;
+use crate::mem::{FRAME_ALLOCATOR, MAPPER};
 use crate::mem::page::{Page, Size4KiB};
 
 static mut LEVEL_5_PAGING: bool = false; // FIXME: Don't make this static mut, this was just out of laziness (make this an AtomicBool)
@@ -501,7 +501,7 @@ impl BuddyFrameAllocator {
     }
 
     /// This function allows for allocating frames larger than MAX_ORDER
-    fn allocate_large_frames(&mut self, order: usize) -> Option<PhysAddr> {
+    pub fn allocate_large_frames(&mut self, order: usize) -> Option<PhysAddr> {
         // FIXME: we can iterate here and such, cuz large allocations don't have as strict perf requirements as smaller/medium ones
         todo!()
     }
@@ -545,6 +545,7 @@ impl BuddyFrameAllocator {
         // FIXME: The issue here is that we are returning the same address which we are storing
         println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry_raw as u64), curr_order, order);
         println!("curr_val: {} | ret {}", self.orders[order] * 4096, entry_raw);
+        println!("map_offset: {} align: {}", self.map_offset, self.map_offset % 4096);
 
         Some(PhysAddr::new(entry_raw as u64))
     }
@@ -868,3 +869,38 @@ pub fn search_length_limited_nearest(container: &[MemoryRegion], target: u64, le
         }
     }
 }
+
+pub fn map_multi_order_page(frame: Option<PhysAddr>, order: usize) {
+    if let Some(frame) = &frame {
+        for fc in 0..(1 << order) {
+            map_page(PhysAddr::new(frame.as_u64() + (fc as u64 * 4096)));
+        }
+    }
+}
+
+pub fn map_single_order_page(frame: Option<PhysFrame>) {
+    if let Some(frame) = &frame {
+        map_page(frame.clone().start_address);
+    }
+}
+
+fn map_page(frame: PhysAddr) {
+    let mut frame_allocator = unsafe { FRAME_ALLOCATOR.lock() };
+    let mut frame_allocator = frame_allocator.deref_mut();
+
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+    let mut mapper = MAPPER.lock();
+    let page: Page<Size4KiB> =
+        Page::from_start_address(VirtAddr::new(frame.as_u64())).unwrap();
+    println!("mapped: {:?}", VirtAddr::new(frame.as_u64()));
+    let phys_frame: PhysFrame<Size4KiB> =
+        PhysFrame::from_start_address(frame.clone()).unwrap();
+    unsafe {
+        mapper
+            .map_to::<BuddyFrameAllocator>(page, phys_frame, flags, frame_allocator)
+            .unwrap()
+            .flush()
+    };
+}
+
+

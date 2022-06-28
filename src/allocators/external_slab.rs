@@ -16,6 +16,9 @@ use core::sync::atomic::Ordering;
 use slabmalloc::{AllocationError, Allocator, LargeObjectPage, ObjectPage, ZoneAllocator};
 use spin::Mutex;
 
+// FIXME: currently it looks like the underlying slab allocation library is buggy because it returns unaligned, seemingly random addresses
+// FIXME: see: https://github.com/gz/rust-slabmalloc/issues/9
+
 /// To use a ZoneAlloactor we require a lower-level allocator
 /// (not provided by this crate) that can supply the allocator
 /// with backing memory for `LargeObjectPage` and `ObjectPage` structs.
@@ -55,6 +58,8 @@ impl Pager {
             }
         }
 
+        println!("allocated: {} align: {}", frame.unwrap().as_u64(), frame.unwrap().as_u64() % 4096);
+
         frame.map(|x| {
             ptr::from_exposed_addr_mut(
                 (x.as_u64()/* + PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed)*/) as usize,
@@ -65,11 +70,24 @@ impl Pager {
     /// De-allocates a given `page_size`.
     fn dealloc_page(&self, ptr: *mut u8, page_size: usize) {
         // FIXME: do we translate smth?
-        println!("deallocing!");
+        println!("deallocing {} align: {}", ptr.expose_addr(), ptr.expose_addr() % 4096);
+        let order = BuddyFrameAllocator::order_from_size(page_size);
+        let frame = PhysAddr::new(ptr.expose_addr() as u64);
+        for fc in 0..(1 << order) {
+            let mut mapper = MAPPER.lock();
+            println!("frame: {} align: {}", frame.as_u64() + (fc as u64 * 4096), (frame.as_u64() + (fc as u64 * 4096)) % 4096);
+            let page: Page<Size4KiB> =
+                Page::from_start_address(VirtAddr::new(frame.as_u64() + (fc as u64 * 4096))).unwrap();
+            println!("unmapped: {:?}", VirtAddr::new(frame.as_u64() + (fc as u64 * 4096)));
+            unsafe {
+                mapper
+                    .unmap(page).unwrap().1.flush();
+            };
+        }
         unsafe {
             FRAME_ALLOCATOR.lock().deallocate_frames(
                 PhysAddr::new(ptr.expose_addr() as u64),
-                BuddyFrameAllocator::order_from_size(page_size),
+                order,
             )
         };
     }

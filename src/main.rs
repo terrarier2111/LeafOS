@@ -92,8 +92,7 @@ fn test_alloc() {
     if unsafe { COUNTER } > 10000 {
         unsafe { COUNTER = 0; }
         let mut alloc = unsafe { FRAME_ALLOCATOR.lock() }; // FIXME: alloc and dealloc frame!
-        // let frame = alloc.allocate_frame().unwrap();
-        let frame = alloc.allocate_frames_tlb(0).unwrap();
+        let frame = alloc.allocate_frames(0).unwrap();
         alloc.deallocate_frame(frame);
     } else {
         unsafe { COUNTER += 1; }
