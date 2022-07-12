@@ -343,7 +343,7 @@ impl BuddyFrameAllocator {
             let meta_addr = map_offset + (page_address.div_floor(4096) * 10) as usize; // FIXME: we probably gotta subtract the mapoffset somewhere - DO THAT!
             ptr::from_exposed_addr_mut::<MapEntry>(meta_addr)
         } else {
-            println!("got zero param in entry func!");
+            // println!("got zero param in entry func!");
             ptr::null_mut()
         }
     }
@@ -536,16 +536,16 @@ impl BuddyFrameAllocator {
             let buddy_size = 4096 * (1 << curr_order);
             let other = unsafe { &mut *self.entry((entry_raw + buddy_size) as u64) };
             other.free();
-            println!("other: {} | order: {} | dist: {}", other.assoc_page(self.map_offset).expose_addr(), curr_order, entry_raw.abs_diff(other.assoc_page(self.map_offset).expose_addr()));
+            // println!("other: {} | order: {} | dist: {}", other.assoc_page(self.map_offset).expose_addr(), curr_order, entry_raw.abs_diff(other.assoc_page(self.map_offset).expose_addr()));
             self.orders[curr_order] = other.assoc_page(self.map_offset).expose_addr() / 4096; // convert into internal repr and replace current list head
         }
 
         // println!("curr: {} | curr_aligned: {}", entry_raw, other_buddy(PhysAddr::new(entry_raw as u64), order).as_u64());
 
         // FIXME: The issue here is that we are returning the same address which we are storing
-        println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry_raw as u64), curr_order, order);
-        println!("curr_val: {} | ret {}", self.orders[order] * 4096, entry_raw);
-        println!("map_offset: {} align: {}", self.map_offset, self.map_offset % 4096);
+        // println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry_raw as u64), curr_order, order);
+        // println!("curr_val: {} | ret {}", self.orders[order] * 4096, entry_raw);
+        // println!("map_offset: {} align: {}", self.map_offset, self.map_offset % 4096);
 
         Some(PhysAddr::new(entry_raw as u64))
     }

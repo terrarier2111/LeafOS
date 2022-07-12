@@ -1,5 +1,5 @@
 use core::arch::asm;
-use core::mem::transmute;
+use core::mem::{MaybeUninit, transmute};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use pc_keyboard::{HandleControl, Keyboard, layouts, ScancodeSet1};
@@ -67,14 +67,15 @@ pub unsafe fn init_apic(physical_memory_offset: u64) {
         .set_xapic_base(apic_virtual_address)
         .build()
         .unwrap_or_else(|err| panic!("{}", err));
-    LAPIC.replace(lapic);
+    LAPIC.write(lapic);
+    LAPIC_ENABLED.store(true, Ordering::SeqCst);
     {
-        LAPIC.as_mut().unwrap().set_timer_divide(TimerDivide::Div64);
-        LAPIC.as_mut().unwrap().set_timer_initial(TIMER_DELAY as u32);
-        LAPIC.as_mut().unwrap().set_timer_mode(TimerMode::OneShot);
+        LAPIC.assume_init_mut().set_timer_divide(TimerDivide::Div64);
+        LAPIC.assume_init_mut().set_timer_initial(TIMER_DELAY as u32);
+        LAPIC.assume_init_mut().set_timer_mode(TimerMode::OneShot);
         pit::write_channel0_count(TIMER_DELAY);
     }
-    LAPIC.as_mut().unwrap().enable();
+    LAPIC.assume_init_mut().enable();
     // lapic was enabled, we can now safely disable the pic
     pic::disable(); // FIXME: Should we do this before LAPIC is enabled?
 
@@ -244,7 +245,7 @@ extern "x86-interrupt" fn apic_timer_config_handler(
 {
     // FIXME: Sometimes this gets called before apic is setup, FIX THIS!
     TRIGGERED_ONCE.store(true, Ordering::SeqCst);
-    unsafe { LAPIC.as_mut().unwrap().end_of_interrupt(); }
+    unsafe { LAPIC.assume_init_mut().end_of_interrupt(); }
 }
 
 static TRIGGERED_ONCE: AtomicBool = AtomicBool::new(false);
@@ -253,7 +254,7 @@ static TRIGGERED_ONCE: AtomicBool = AtomicBool::new(false);
 
 #[no_mangle]
 pub fn restart_apic() {
-    unsafe { LAPIC.as_mut().unwrap().end_of_interrupt(); }
+    unsafe { LAPIC.assume_init_mut().end_of_interrupt(); }
 
     start_timer_one_shot(SCHEDULER_TIMER_DELAY);
 }
@@ -277,6 +278,11 @@ pub extern "x86-interrupt" fn apic_timer_handler(_interrupt_stack_frame: Interru
         "push r13",
         "push r14",
         "push r15",
+        // the following two instructions essentially act as push cr3
+
+        // "mov cr3, rax",
+        // "push rax",
+
         "push rbp",
 
         "call restart_apic",
@@ -304,6 +310,11 @@ pub extern "x86-interrupt" fn apic_timer_handler(_interrupt_stack_frame: Interru
         "mov gs, ax", // SS is handled by iretq
 
         "pop rbp",
+        // the following two instructions essentially act as pop cr3
+
+        // "pop rax",
+        // "mov rax, cr3",
+
         "pop r15",
         "pop r14",
         "pop r13",
@@ -327,14 +338,14 @@ extern "x86-interrupt" fn apic_error_handler(
     _stack_frame: InterruptStackFrame)
 {
     println!("apic error handler!");
-    unsafe { LAPIC.as_mut().unwrap().end_of_interrupt(); }
+    unsafe { LAPIC.assume_init_mut().end_of_interrupt(); }
 }
 
 extern "x86-interrupt" fn apic_spurious_handler(
     _stack_frame: InterruptStackFrame)
 {
     println!("apic spurious handler!");
-    unsafe { LAPIC.as_mut().unwrap().end_of_interrupt(); }
+    unsafe { LAPIC.assume_init_mut().end_of_interrupt(); }
 }
 
 // pic stuff
@@ -342,17 +353,18 @@ extern "x86-interrupt" fn apic_spurious_handler(
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static PICS: spin::Mutex<ChainedPics> =
-    spin::Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
+pub static PICS: Mutex<ChainedPics> =
+    Mutex::new(unsafe { ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET) });
 
 // FIXME: Make this per-core
-static mut LAPIC: Option<LocalApic> = None;
+static mut LAPIC: MaybeUninit<LocalApic> = MaybeUninit::uninit();
+static LAPIC_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn start_timer_one_shot(us: usize) {
     unsafe {
-        LAPIC.as_mut().unwrap().set_timer_divide(TimerDivide::Div64);
-        LAPIC.as_mut().unwrap().set_timer_mode(TimerMode::OneShot);
-        LAPIC.as_mut().unwrap().set_timer_initial((us * (APIC_TIMER_FREQUENCY.load(Ordering::SeqCst) / 1000000)) as u32);
+        LAPIC.assume_init_mut().set_timer_divide(TimerDivide::Div64);
+        LAPIC.assume_init_mut().set_timer_mode(TimerMode::OneShot);
+        LAPIC.assume_init_mut().set_timer_initial((us * (APIC_TIMER_FREQUENCY.load(Ordering::SeqCst) / 1000000)) as u32);
     }
 }
 
@@ -461,12 +473,12 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(
 }
 
 fn has_lapic() -> bool {
-    unsafe { LAPIC.is_some() }
+    LAPIC_ENABLED.load(Ordering::Relaxed)
 }
 
 unsafe fn end_of_interrupt(interrupt_id: u8) {
     if has_lapic() {
-        LAPIC.as_mut().unwrap().end_of_interrupt();
+        LAPIC.assume_init_mut().end_of_interrupt();
     } else {
         PICS.lock().notify_end_of_interrupt(interrupt_id);
     }

@@ -18,9 +18,12 @@ pub mod page;
 pub mod mapped_page_table;
 pub mod heap;
 
+// FIXME: look at this: https://softwareengineering.stackexchange.com/questions/207386/how-are-the-size-of-the-stack-and-heap-limited-by-the-os
+// FIXME: and for slab allocation look at this: https://hammertux.github.io/slab-allocator
+
 pub static mut FRAME_ALLOCATOR: Mutex<BuddyFrameAllocator> = Mutex::new(BuddyFrameAllocator::invalid());
 lazy_static! {
-        pub static ref MAPPER: Mutex<OffsetPageTable<'static>> = Mutex::new(unsafe { init(PHYSICAL_MEMORY_OFFSET.load(Ordering::SeqCst)) });
+        pub static ref MAPPER: Mutex<OffsetPageTable<'static>> = Mutex::new(unsafe { init(PHYSICAL_MEMORY_OFFSET.load(Ordering::Acquire)) }); // FIXME: don't store the MAPPER but instead generate it new a couple of times as it's really cheap to recreate
 }
 pub static PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
 
@@ -44,23 +47,14 @@ pub fn setup(
 }
 
 // FIXME: We need to add a syscall/(or any other way) allow the os to provide frames/pages to the userspace
-#[repr(transparent)]
-pub struct AddressSpace {
-    page_table: PhysFrame,
-}
 
-impl AddressSpace {
+pub fn setup_user_address_space() -> PhysFrame {
+    let mut frame_alloc = unsafe { FRAME_ALLOCATOR.lock() };
+    let frame = frame_alloc.allocate_frame().unwrap(); // FIXME: Properly handle errors!
+    let pgt = unsafe { &mut *ptr::from_exposed_addr_mut(frame.start_address.as_u64() as usize) as &mut PageTable };
 
-    pub fn new(frame_allocator: &mut BuddyFrameAllocator) -> Self {
-        let frame = frame_allocator.allocate_frame().unwrap(); // FIXME: Properly handle errors!
-        let pgt = unsafe { &mut *ptr::from_exposed_addr_mut(frame.start_address.as_u64() as usize) as &mut PageTable };
+    // clear all entries
+    pgt.zero();
 
-        // clear all entries
-        pgt.zero();
-
-        Self {
-            page_table: frame,
-        }
-    }
-
+    frame
 }

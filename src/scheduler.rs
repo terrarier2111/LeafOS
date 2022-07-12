@@ -4,16 +4,18 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::mem::size_of;
+use core::intrinsics::unlikely;
+use core::mem::{MaybeUninit, size_of};
 use core::ptr;
+use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::{Mutex, Once};
-use crate::{println, wait_for_interrupt};
+use crate::{mem, println, wait_for_interrupt};
 
-static IDLE_TASK: Once<Arc<Mutex<(Process, Box<ProcessState>)>>> = Once::new();
+static IDLE_TASK: Once<Arc<Mutex<(Process, ProcessState)>>> = Once::new(); // FIXME: we should probably make this per-core and MAYBE we should make this MaybeUninit and init it at startup instead of using Once!
 static INIT: AtomicBool = AtomicBool::new(false); // FIXME: Make this per-core.
-static mut VOID_TASK: Option<Box<ProcessState>> = None;
+static mut VOID_TASK: MaybeUninit<ProcessState> = MaybeUninit::uninit();
 
 lazy_static! {
     static ref SCHEDULER: Arc<Mutex<Box<dyn Scheduler + Send>>> = {
@@ -25,10 +27,10 @@ pub const SCHEDULER_TIMER_DELAY: usize = 1000000;
 
 pub trait Scheduler {
     // this is for internal use only
-    fn pick_next(&mut self) -> Option<(Process, Box<ProcessState>)>;
+    fn pick_next(&mut self) -> Option<(Process, ProcessState)>;
 
     // this is for internal use only
-    fn reinsert_task(&mut self, task: (Process, Box<ProcessState>));
+    fn reinsert_task(&mut self, task: (Process, ProcessState));
 
     /// This should return different values for different cpu cores
     // fn current_process(&self) -> Option<&SchedulerEntry>;
@@ -37,7 +39,7 @@ pub trait Scheduler {
 }
 
 struct RoundRobinScheduler {
-    tasks: Vec<(Process, Box<ProcessState>)>,
+    tasks: Vec<(Process, ProcessState)>,
     task_id: u64,
 }
 
@@ -51,11 +53,11 @@ impl RoundRobinScheduler {
 }
 
 impl Scheduler for RoundRobinScheduler {
-    fn pick_next(&mut self) -> Option<(Process, Box<ProcessState>)> {
+    fn pick_next(&mut self) -> Option<(Process, ProcessState)> {
         self.tasks.pop()
     }
 
-    fn reinsert_task(&mut self, task: (Process, Box<ProcessState>)) {
+    fn reinsert_task(&mut self, task: (Process, ProcessState)) {
         self.tasks.insert(0, task);
     }
 
@@ -68,7 +70,7 @@ impl Scheduler for RoundRobinScheduler {
         self.task_id += 1;
         self.tasks.push((
             Process::new(self.task_id, State::Runnable),
-            Box::new(ProcessState::new(Box::new([0; 4096]), Box::new([0; 4096]), kernel_owned, target_fn)) // FIXME: Make the kernel parameter configurable
+            ProcessState::new(Box::new([0; 4096]), Box::new([0; 4096]), kernel_owned, target_fn) // FIXME: Make the kernel parameter configurable
         ));
         self.task_id
     }
@@ -140,32 +142,30 @@ impl ProcessState {
                 kernel_stack.offset(-INTERRUPT_FRAME_OFFSET - 12).write(0);                               // r14
                 kernel_stack.offset(-INTERRUPT_FRAME_OFFSET - 13).write(0);                               // r15
 
-
-                /*
-                let cr3 = Cr3::read(); // FIXME: Generate a separate virtual address space if needed
-                let reg: u64 = {
-                    let addr = cr3.0.start_address();
-                    addr.as_u64() | cr3.1 as u64
+                if !kernel && false {
+                    let address_space = mem::setup_user_address_space().start_address.as_u64() as usize;
+                    kernel_stack.offset(-INTERRUPT_FRAME_OFFSET - 14).write(address_space);               // cr3
+                }
+                let final_offset = if kernel || true {
+                    14
+                } else {
+                    15
                 };
-                kernel_stack.offset(INTERRUPT_FRAME_OFFSET + 14).write(reg as usize);                    // cr3
-                */
-                /*
-                let cr3: u64;
-                asm!(
-                "mov rax, cr3",
-                out("rax") cr3
-                );
-                kernel_stack.offset(INTERRUPT_FRAME_OFFSET + 14).write(cr3 as usize);*/ // FIXME: Support virtual address spaces!
-
-                kernel_stack.offset(-INTERRUPT_FRAME_OFFSET - 14).write(kernel_addr);                     // rbp
+                kernel_stack.offset(-INTERRUPT_FRAME_OFFSET - final_offset).write(kernel_addr);            // rbp
 
                 // FIXME: (THIS IS JUST A NOTE) IMPORTANT: RBP IS *NOTHING* SPECIAL its just a general purpose register
             }
         }
         const INTERRUPT_FRAME_OFFSET: isize = 4;
 
+        let final_offset = if kernel || true {
+            14
+        } else {
+            15
+        };
+
         Self {
-            kernel_rsp: (kernel_addr - size_of::<usize>() * (14 + INTERRUPT_FRAME_OFFSET) as usize) as u64,
+            kernel_rsp: (kernel_addr - size_of::<usize>() * (final_offset + INTERRUPT_FRAME_OFFSET) as usize) as u64,
             kernel_top_rsp: (kernel_addr + kernel_stack.len()) as u64,
             kernel_stack,
             user_stack,
@@ -175,7 +175,7 @@ impl ProcessState {
 
 struct SchedulerEntry {
     process: Process,
-    state: Box<ProcessState>,
+    state: ProcessState,
     balance: u64,
 }
 
@@ -193,18 +193,18 @@ fn idle() {
     }
 }
 
-fn get_idle_task() -> Arc<Mutex<(Process, Box<ProcessState>)>> {
+fn get_idle_task() -> Arc<Mutex<(Process, ProcessState)>> {
     IDLE_TASK.call_once(|| {
         Arc::new(Mutex::new((Process::new(0, State::Runnable),
-                             Box::new(ProcessState::new(Box::new([0; 4096]), Box::new([0; 4096]), true, idle)))))
+                             ProcessState::new(Box::new([0; 4096]), Box::new([0; 4096]), true, idle))))
     }).clone()
 }
 
 // FIXME: Make task per-core
-static mut TASK: Option<(Process, Box<ProcessState>)> = None;
+static mut TASK: Option<(Process, ProcessState)> = None;
 
 pub fn init() {
-    unsafe { VOID_TASK = Some(Box::new(ProcessState::new(Box::new([0; 256]), Box::new([0; 0]), true, idle))); }; // FIXME: Use as little data as possible
+    unsafe { VOID_TASK.write(ProcessState::new(Box::new([0; 256]), Box::new([0; 0]), true, idle)); }; // FIXME: Use as little data as possible
 }
 
 fn get_scheduler() -> Arc<Mutex<Box<dyn Scheduler + Send>>> {
@@ -218,15 +218,15 @@ extern "C" fn select_next_task() -> *mut ProcessState {
 
     let next = next.map_or_else(|| {
         replace_curr_task(None);
-        get_idle_task().clone().lock().1.as_mut() as *mut ProcessState // FIXME: This is a dirty workaround and potentially dangerous, improve this!
+        addr_of_mut!(get_idle_task().clone().lock().1) // FIXME: This is a dirty workaround and potentially dangerous, improve this!
     }, |task| {
         replace_curr_task(Some(task));
-        unsafe { TASK.as_mut().unwrap() }.1.as_mut()
+        addr_of_mut!(unsafe { TASK.as_mut().unwrap() }.1)
     }) as *mut ProcessState;
     next
 }
 
-fn replace_curr_task(task: Option<(Process, Box<ProcessState>)>) {
+fn replace_curr_task(task: Option<(Process, ProcessState)>) {
     if let Some(old_task) = unsafe { TASK.take() } {
         get_scheduler().lock().reinsert_task(old_task);
     }
@@ -234,18 +234,21 @@ fn replace_curr_task(task: Option<(Process, Box<ProcessState>)>) {
 }
 
 #[no_mangle]
-extern "C" fn current_task_ptr() -> *mut ProcessState {
-    if unsafe { TASK.is_some() } {
-        unsafe { TASK.as_mut().unwrap().1.as_mut() }
-    } else {
-        if !INIT.load(Ordering::SeqCst) {
+pub extern "C" fn current_task_ptr() -> *mut ProcessState {
+    if unlikely(unsafe { TASK.is_none() }) {
+        if unlikely(!INIT.load(Ordering::Acquire)) {
             // we return an address to a void in order to prevent the current stack's address from being written to the first task's stack address
-            INIT.store(true, Ordering::SeqCst);
-            return unsafe { VOID_TASK.as_mut().unwrap().as_mut() };
+            INIT.store(true, Ordering::Release);
+            // SAFETY:
+            // it is safe to call as_mut_ptr here because current_task_ptr may only be called after
+            // init was called which initializes VOID_TASK
+            return unsafe { VOID_TASK.as_mut_ptr() };
         }
         let tmp = get_idle_task().clone();
         let mut tmp = tmp.lock();
-        let tmp = tmp.1.as_mut() as *mut ProcessState;
+        let tmp = addr_of_mut!(tmp.1);
         tmp
+    } else {
+        unsafe { addr_of_mut!(TASK.as_mut().unwrap().1) }
     }
 }
