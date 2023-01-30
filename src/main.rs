@@ -5,16 +5,20 @@
 #![reexport_test_harness_main = "test_main"]
 #![feature(const_mut_refs)]
 #![feature(strict_provenance)]
+#![feature(associated_type_defaults)]
 
 extern crate alloc;
 
 mod serial;
 
+use alloc::string::{String, ToString};
+use core::mem::align_of;
 use core::panic::PanicInfo;
 use bootloader::{BootInfo, entry_point};
 use x86::syscall;
 use LeafOS::{hlt_loop, mem, memory, println, scheduler};
 use LeafOS::drivers::pit;
+use LeafOS::elf::load_test_elf;
 use LeafOS::interrupts::init_apic;
 use LeafOS::mem::FRAME_ALLOCATOR;
 use LeafOS::mem::mapped_page_table::FrameAllocator;
@@ -45,13 +49,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     let test_page = allocator.allocate_frame().unwrap();*/
 
     // hlt_loop();
-    println!("initing scheduler!");
+    //println!("initing scheduler!");
     scheduler::init();
-    println!("initing apic!");
+    //println!("initing apic!");
     unsafe { init_apic(boot_info.physical_memory_offset); }
-    println!("initing pit!");
+    //println!("initing pit!");
     pit::init();
-    println!("starting timer!");
+    //println!("starting timer!");
     LeafOS::interrupts::start_timer_one_shot(SCHEDULER_TIMER_DELAY);
 
     println!("starting processes!");
@@ -68,6 +72,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     LeafOS::init_kb_handler();
 
     // x86_64::instructions::interrupts::enable();
+    load_test_elf(/*0x1000_0000*/);
 
     hlt_loop();
 }

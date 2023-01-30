@@ -42,6 +42,7 @@ pub fn setup(
     // FIXME: How can we avoid using Arc here? should we define a global frame allocator?!
     /*crate::allocators::init_heap(&mut mapper)
         .expect("heap initialization failed");*/
+
     println!("inited heap");
     // (mapper/*, Arc::new(test)*/)
 }

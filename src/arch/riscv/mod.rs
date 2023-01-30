@@ -2,6 +2,7 @@ use core::arch::asm;
 use riscv::register::mstatus;
 
 pub(in crate::arch) mod hal_impls {
+    use riscv::register::mstatus;
 
     #[inline]
     pub(in crate::arch) fn nop() {
@@ -30,6 +31,11 @@ pub(in crate::arch) mod hal_impls {
     #[inline]
     pub(in crate::arch) unsafe fn break_point() {
         riscv::asm::ebreak();
+    }
+
+    #[inline]
+    pub(in crate::arch) unsafe fn page_size() -> usize {
+        4096
     }
 
 }

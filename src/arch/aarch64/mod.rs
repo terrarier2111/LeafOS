@@ -32,4 +32,9 @@ pub(in crate::arch) mod hal_impls {
         todo!()
     }
 
+    #[inline]
+    pub(in crate::arch) unsafe fn page_size() -> usize {
+        todo!()
+    }
+
 }

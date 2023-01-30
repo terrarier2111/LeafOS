@@ -80,3 +80,19 @@ pub unsafe fn break_point() {
     #[cfg(target_arch = "aarch64")]
     aarch64::hal_impls::wait_for_interrupt();
 }
+
+#[inline]
+pub fn page_size() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    return x86::hal_impls::page_size();
+    #[cfg(target_arch = "riscv")]
+    return riscv::hal_impls::page_size();
+    #[cfg(target_arch = "aarch64")]
+    return aarch64::hal_impls::page_size();
+}
+
+/// returns the number of usable bits, counting from the LSB up to the returned - 1 th bit
+#[inline]
+pub fn addr_used_bits() -> usize {
+    todo!()
+}

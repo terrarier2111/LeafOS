@@ -34,7 +34,7 @@ impl Pager {
 
     /// Allocates a given `page_size`.
     fn alloc_page(&self, page_size: usize) -> Option<*mut u8> {
-        let cnt = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let cnt = COUNTER.fetch_add(1, Ordering::Relaxed);
         // FIXME: map multiple pages
         let order = BuddyFrameAllocator::order_from_size(page_size);
         let frame = unsafe { FRAME_ALLOCATOR.lock().allocate_frames(order) };
@@ -59,6 +59,8 @@ impl Pager {
                         .flush()
                 };
             }
+        } else {
+            println!("frame allocation for order: {} and page size: {} failed", order, page_size);
         }
 
         // println!("allocated: {} align: {}", frame.unwrap().as_u64(), frame.unwrap().as_u64() % 4096);
@@ -68,7 +70,7 @@ impl Pager {
                 (x.as_u64()/* + PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed)*/) as usize,
             )
         });
-        println!("alloc ret: {} cnt: {} align: {}", ret.map_or(0, |x| x.expose_addr()), cnt, frame.unwrap().as_u64() % 4096);
+        println!("alloc ret: {} cnt: {} align: {}", ret.map_or(0, |x| x.expose_addr()), cnt, frame.map_or(0xBEEF * 4096, |x| x.as_u64()) % 4096);
         ret
     }
 
@@ -112,6 +114,7 @@ impl Pager {
 
     /// Allocates a new LargeObjectPage from the system.
     fn allocate_large_page(&self) -> Option<&'static mut LargeObjectPage<'static>> {
+        println!("alloc large page 1!");
         self.alloc_page(Pager::LARGE_PAGE_SIZE)
             .map(|r| ptr::from_exposed_addr_mut::<LargeObjectPage>(r.expose_addr()))
             .map_or(None, |x| unsafe { x.as_mut() })
@@ -162,7 +165,7 @@ unsafe impl GlobalAlloc for SafeZoneAllocator {
                         ret
                     },
                     Err(AllocationError::OutOfMemory) => {
-                        println!("OOM!");
+                        println!("Do refill!");
                         if layout.size() <= ZoneAllocator::MAX_BASE_ALLOC_SIZE {
                             PAGER.allocate_page().map_or(ptr::null_mut(), |page| {
                                 zone_allocator
@@ -174,6 +177,7 @@ unsafe impl GlobalAlloc for SafeZoneAllocator {
                                     .as_ptr()
                             })
                         } else {
+                            println!("large page alloc 0!");
                             // layout.size() <= ZoneAllocator::MAX_ALLOC_SIZE
                             PAGER
                                 .allocate_large_page()
@@ -202,7 +206,7 @@ unsafe impl GlobalAlloc for SafeZoneAllocator {
             Pager::LARGE_PAGE_SIZE => PAGER.dealloc_page(ptr, Pager::LARGE_PAGE_SIZE),
             0..=ZoneAllocator::MAX_ALLOC_SIZE => {
                 // FIXME: implement deallocation once a new version of the crate releases
-                /*if let Some(nptr) = NonNull::new(ptr) {
+                if let Some(nptr) = NonNull::new(ptr) {
                     self.0
                         .lock()
                         .deallocate(nptr, layout)
@@ -214,7 +218,11 @@ unsafe impl GlobalAlloc for SafeZoneAllocator {
                 // A proper reclamation strategy could be implemented here
                 // to release empty pages back from the ZoneAllocator to the PAGER
                 let mut zone_allocator = self.0.lock();
-                PAGER.dealloc_page(ptr, layout.size());*/
+                // zone_allocator.deallocate(NonNull::new(ptr).unwrap(), layout).unwrap();
+                zone_allocator.try_reclaim_base_pages(1, |page| {
+                    PAGER.dealloc_page(page.cast(), layout.size());
+                });
+                println!("unhandled dealloc!");
             }
             _ => unimplemented!("Can't handle it, probably needs another allocator."),
         }

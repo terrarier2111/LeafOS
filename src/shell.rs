@@ -148,7 +148,7 @@ impl Shell {
 
 }
 
-impl fmt::Write for Shell {
+impl Write for Shell {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write(s);
         Ok(())

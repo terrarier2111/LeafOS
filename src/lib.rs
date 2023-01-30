@@ -14,6 +14,9 @@
 #![feature(ptr_metadata)]
 #![feature(adt_const_params)]
 #![feature(try_trait_v2)]
+#![feature(core_intrinsics)]
+#![feature(pointer_is_aligned)]
+#![feature(pointer_byte_offsets)]
 
 extern crate alloc;
 
@@ -43,6 +46,7 @@ pub mod syscall;
 pub mod error_codes;
 pub mod mem;
 pub mod utils;
+pub mod elf;
 
 pub fn init() {
     gdt::init();

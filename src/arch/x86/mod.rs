@@ -36,6 +36,11 @@ pub(in crate::arch) mod hal_impls {
         asm!("int3");
     }
 
+    #[inline]
+    pub(in crate::arch) fn page_size() -> usize {
+        4096
+    }
+
 }
 
 pub fn flags() -> usize {
