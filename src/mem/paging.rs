@@ -326,7 +326,7 @@ impl BuddyFrameAllocator {
         }*/
 
 
-        Self { map_offset, orders }
+        Self { map_offset, orders, large_alloc: LargeFrameAllocator::invalid() }
     }
 
     #[inline]
@@ -362,11 +362,11 @@ impl BuddyFrameAllocator {
 
     /// This function allows for allocating frames larger than MAX_ORDER
     pub fn allocate_large_frames(&mut self, order: usize) -> Option<PhysAddr> {
-        // FIXME: we can iterate here and such, cuz large allocations don't have as strict perf requirements as smaller/medium ones
-        todo!()
+        self.large_alloc.allocate(order)
     }
 
     pub fn allocate_frames(&mut self, order: usize) -> Option<PhysAddr> {
+        // FIXME: try using allocate_large_frames if we run out of space here.
         let mut curr_order = order;
         while MAX_ORDER > curr_order && self.orders[curr_order] == 0 {
             curr_order += 1;
@@ -426,7 +426,7 @@ impl BuddyFrameAllocator {
     pub fn order_from_size(size: usize) -> usize {
         let frames = size.div_ceil(4096);
         for i in 0..ORDERS {
-            if (1 << i) >= frames {
+            if (1 << i) > frames {
                 return i;
             }
         }
@@ -438,7 +438,7 @@ impl BuddyFrameAllocator {
     /// Safety:
     /// This should be kernel internal (or we somehow have to ensure that no pages are freed incorrectly)
     pub unsafe fn deallocate_frames_large(&mut self, address: PhysAddr, order: usize) {
-        todo!()
+        self.large_alloc.deallocate(address, order)
     }
 
     pub fn deallocate_frames(&mut self, address: PhysAddr, order: usize) {
@@ -608,25 +608,114 @@ impl LargeFrameAllocator {
     }
 
     fn try_insert(&mut self, memory: &mut MemoryChunk) -> Option<MemoryChunk> {
+        let mut align_leftovers = None;
         if !memory.ptr.is_aligned_to(LARGE_PAGE_SIZE) {
             let offset = memory.ptr.align_offset(LARGE_PAGE_SIZE).div_ceil(4096);
-            if memory.pages > (offset + LARGE_PAGE_SIZE / PAGE_SIZE) {
+            if memory.pages <= (offset + LARGE_PAGE_SIZE / PAGE_SIZE) {
+                return None;
+            }
+            align_leftovers = Some(MemoryChunk {
+                ptr: memory.ptr,
+                pages: offset,
+            });
+            memory.ptr = unsafe { memory.ptr.byte_add(offset) };
+        }
+        let large_page_multiplier = LARGE_PAGE_SIZE / PAGE_SIZE;
+        let max_size = (1 << (LARGE_ORDERS - 1)) * large_page_multiplier;
+        while memory.pages >= max_size {
+            let order = self.orders.len() - 1;
+            let curr = self.orders[order];
+            if curr != 0 {
+                let curr_ptr = Self::entry_glob(curr as u64 * 4096, self.map_offset);
+                let new_ptr = Self::entry_glob(memory.ptr as usize as u64, self.map_offset);
+                unsafe { new_ptr.as_mut().unwrap() }.set_next(curr_ptr, self.map_offset);
+                unsafe { curr_ptr.as_mut().unwrap() }.set_prev(new_ptr, self.map_offset);
+                self.orders[order] = memory.ptr as usize / 4096;
+            }
+            memory.pages -= max_size;
+            memory.ptr = unsafe { memory.ptr.byte_add(max_size) };
+        }
+
+        if highest != u64::MAX {
+            while memory.pages >= large_page_multiplier {
+                let mut order = None;
+                for x in 0..self.orders.len() {
+                    if memory.pages > large_page_multiplier * (1 << x) {
+                        order = Some(x);
+                        break;
+                    }
+                }
+
+                if let Some(order) = order {
+                    let order = self.orders.len() - 1 - order;
+                    let size = large_page_multiplier * (1 << order);
+                    let curr = self.orders[order];
+                    if curr != 0 {
+                        let curr_ptr = Self::entry_glob(curr as u64 * 4096, self.map_offset);
+                        let new_ptr = Self::entry_glob(memory.ptr as usize as u64, self.map_offset);
+                        unsafe { new_ptr.as_mut().unwrap() }.set_next(curr_ptr, self.map_offset);
+                        unsafe { curr_ptr.as_mut().unwrap() }.set_prev(new_ptr, self.map_offset);
+                        self.orders[order] = memory.ptr as usize / 4096;
+                    }
+                    memory.pages -= size;
+                    memory.ptr = unsafe { memory.ptr.byte_add(size) };
+                }
 
             }
-            unsafe { memory.ptr.byte_add(offset) };
         }
-        while memory.size > (1 << (LARGE_ORDERS - 1)) {
-            self.orders[self.orders.len() - 1]
-            memory.size -= 1 << (LARGE_ORDERS - 1);
-            memory.ptr += 1 << (LARGE_ORDERS - 1);
-        }
+
+        align_leftovers
     }
 
-    fn allocate(&mut self, pages: usize) {
+    fn allocate(&mut self, order: usize) -> Option<PhysAddr> {
+        // FIXME: check this method!
 
+        // FIXME: we can iterate here and such, cuz large allocations don't have as strict perf requirements as smaller/medium ones
+        let mut curr_order = order;
+        while MAX_ORDER > curr_order && self.orders[curr_order] == 0 {
+            curr_order += 1;
+        }
+        if curr_order >= MAX_ORDER {
+            return None;
+        }
+
+        let entry_raw = self.orders[curr_order] * 4096;
+        let entry = unsafe { self.entry(entry_raw as u64).as_mut().unwrap() };
+
+        // retrieve next entry and update its metadata
+        let next_entry = entry.get_next(self.map_offset);
+        if !next_entry.is_null() {
+            self.orders[curr_order] = unsafe { next_entry.as_mut().unwrap().assoc_page(self.map_offset).expose_addr() / 4096 };
+        } else {
+            self.orders[curr_order] = 0;
+        }
+        if !next_entry.is_null() {
+            let next_entry = unsafe { next_entry.as_mut().unwrap() };
+            next_entry.set_prev(ptr::null_mut(), self.map_offset);
+        }
+
+        // Split up the buddy until we have the desired size
+        while curr_order > order {
+            curr_order -= 1;
+            let buddy_size = (1 << curr_order) * LARGE_PAGE_SIZE;
+            let other = unsafe { &mut *self.entry((entry_raw + buddy_size) as u64) };
+            other.free();
+            // println!("other: {} | order: {} | dist: {}", other.assoc_page(self.map_offset).expose_addr(), curr_order, entry_raw.abs_diff(other.assoc_page(self.map_offset).expose_addr()));
+            self.orders[curr_order] = other.assoc_page(self.map_offset).expose_addr() / 4096; // convert into internal repr and replace current list head
+        }
+
+        // println!("curr: {} | curr_aligned: {}", entry_raw, other_buddy(PhysAddr::new(entry_raw as u64), order).as_u64());
+
+        // FIXME: The issue here is that we are returning the same address which we are storing
+        // println!("allocated frame: {:?} | curr order: {} | order: {}", PhysAddr::new(entry_raw as u64), curr_order, order);
+        // println!("curr_val: {} | ret {}", self.orders[order] * 4096, entry_raw);
+        // println!("map_offset: {} align: {}", self.map_offset, self.map_offset % 4096);
+
+        Some(PhysAddr::new(entry_raw as u64))
     }
 
-    fn deallocate(&mut self, pages: usize) {
+    fn deallocate(&mut self, address: PhysAddr, order: usize) {
+        // FIXME: check this method!
         let entry_raw = unsafe { self.entry(address.as_u64()) };
         let entry = unsafe { entry_raw.as_mut().unwrap() }; // FIXME: do some sanity checking!
         // Self::free_entry(self.map_offset, address.as_u64() as usize);
@@ -636,12 +725,12 @@ impl LargeFrameAllocator {
             if !entry.has_neighbor()/* || !other_buddy.is_free()*/ {
                 break;
             }
-            let offset = 4096 * (1 << order);
+            let offset = LARGE_PAGE_SIZE * (1 << order);
             // let other_buddy = other_buddy(address, order).as_u64();
             let other_addr = if entry.is_first() {
-                address.as_u64() + offset
+                address.as_u64() + offset as u64
             } else {
-                address.as_u64() - offset
+                address.as_u64() - offset as u64
             };
             let other_buddy = unsafe { self.entry(other_addr).as_mut().unwrap() };
             /*if !Self::entry_has_neighbor(self.map_offset, address.as_u64() as usize) || !Self::is_free(self.map_offset, other_buddy.as_u64() as usize) {

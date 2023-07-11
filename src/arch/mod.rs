@@ -78,7 +78,7 @@ pub unsafe fn break_point() {
     #[cfg(target_arch = "riscv")]
     riscv::hal_impls::break_point();
     #[cfg(target_arch = "aarch64")]
-    aarch64::hal_impls::wait_for_interrupt();
+    aarch64::hal_impls::break_point();
 }
 
 #[inline]
