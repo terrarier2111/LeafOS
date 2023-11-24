@@ -4,18 +4,17 @@ use alloc::vec::Vec;
 use volatile::Volatile;
 use lazy_static::lazy_static;
 use spin::Mutex;
+use core::cell::{Cell, UnsafeCell, SyncUnsafeCell};
 use core::fmt;
+use core::mem::transmute;
 use x86_64::structures::idt::InterruptDescriptorTable;
 use crate::drivers::driver::{CharDriverImpl, Driver};
 use crate::println;
 
-lazy_static! {
-    pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
-        column_position: 0,
-        color_code: ColorCode::new(Color::Yellow, Color::Black),
-        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
-    });
-}
+pub static WRITER: Mutex<Writer> = Mutex::new(Writer {
+    column_position: 0,
+    color_code: ColorCode::new(Color::Yellow, Color::Black),
+});
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +43,7 @@ pub enum Color {
 pub struct ColorCode(u8);
 
 impl ColorCode {
-    pub fn new(foreground: Color, background: Color) -> Self {
+    pub const fn new(foreground: Color, background: Color) -> Self {
         Self((background as u8) << 4 | (foreground as u8))
     }
 }
@@ -139,7 +138,11 @@ struct Buffer {
 pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
-    buffer: &'static mut Buffer,
+}
+
+#[inline]
+fn buffer() -> &'static mut Buffer {
+    unsafe { &mut *(0xb8000 as *mut Buffer) }
 }
 
 impl Writer {
@@ -163,7 +166,7 @@ impl Writer {
             let row = BUFFER_HEIGHT - 1;
             let col = self.column_position;
 
-            self.buffer.chars[row][col].write(*char);
+            buffer().chars[row][col].write(*char);
             self.column_position += 1;
         }
     }
@@ -196,7 +199,7 @@ impl Writer {
                 let row = BUFFER_HEIGHT - 1;
                 let col = self.column_position;
 
-                self.buffer.chars[row][col].write(ScreenChar {
+                buffer().chars[row][col].write(ScreenChar {
                     ascii_character: char,
                     color_code: color,
                 });
@@ -208,8 +211,8 @@ impl Writer {
     pub fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
-                let character = self.buffer.chars[row][col].read();
-                self.buffer.chars[row - 1][col].write(character);
+                let character = buffer().chars[row][col].read();
+                buffer().chars[row - 1][col].write(character);
             }
         }
         self.clear_row(BUFFER_HEIGHT - 1);
@@ -219,8 +222,8 @@ impl Writer {
     pub fn old_line(&mut self) {
         for row in (0..(BUFFER_HEIGHT - 1)).rev() {
             for col in 0..BUFFER_WIDTH {
-                let character = self.buffer.chars[row][col].read();
-                self.buffer.chars[row + 1][col].write(character);
+                let character = buffer().chars[row][col].read();
+                buffer().chars[row + 1][col].write(character);
             }
         }
         self.clear_row(0);
@@ -233,13 +236,13 @@ impl Writer {
             color_code: self.color_code,
         };
         for col in 0..BUFFER_WIDTH {
-            self.buffer.chars[row][col].write(blank);
+            buffer().chars[row][col].write(blank);
         }
     }
 
     pub fn is_current_row_clear(&self) -> bool {
         for col in 0..BUFFER_WIDTH {
-            let character: ScreenChar = self.buffer.chars[BUFFER_HEIGHT - 1][col].read();
+            let character: ScreenChar = buffer().chars[BUFFER_HEIGHT - 1][col].read();
             if character.ascii_character != b' ' || character.color_code != self.color_code {
                 return false;
             }
@@ -272,11 +275,6 @@ unsafe impl Driver for Writer {
         // We don't have to do anything here
         true
     }
-
-    #[inline]
-    unsafe fn exit(&mut self) {
-        // We don't have to do anything here
-    }
 }
 
 unsafe impl CharDriverImpl<ScreenChar> for Writer {
@@ -304,7 +302,7 @@ unsafe impl CharDriverImpl<ScreenChar> for Writer {
             start = start << 8;
             start
         };
-        self.buffer.chars[index & HEIGHT_MASK][index & WIDTH_MASK] = Volatile::new(*char);
+        buffer().chars[index & HEIGHT_MASK][index & WIDTH_MASK] = Volatile::new(*char);
     }
 
     #[cold]

@@ -11,13 +11,13 @@
 #![feature(naked_functions)]
 #![feature(abi_x86_interrupt)]
 #![feature(ptr_metadata)] // used for checking for presence of cpuid instruction
+#![feature(sync_unsafe_cell)]
 
 extern crate alloc;
 
 use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::panic::PanicInfo;
-use bootloader::{BootInfo, entry_point};
 use crate::arch::{enable_interrupts, disable_interrupts, wait_for_interrupt};
 use crate::shell::{has_shell, SHELL};
 
@@ -38,6 +38,9 @@ pub mod filesystem;
 pub mod arch;
 pub mod syscall;
 pub mod error_codes;
+pub mod text_renderer;
+pub mod conc_once_cell;
+pub mod sized_box;
 
 pub fn init() {
     gdt::init();

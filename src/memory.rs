@@ -1,4 +1,6 @@
-use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use core::ptr::NonNull;
+
+use limine::{MemmapEntry, NonNullPtr, MemoryMapEntryType};
 use x86_64::{PhysAddr, structures::paging::PageTable, VirtAddr};
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PhysFrame, Size4KiB};
 use crate::memory;
@@ -50,8 +52,9 @@ unsafe impl FrameAllocator<Size4KiB> for EmptyFrameAllocator {
 
 /// A FrameAllocator that returns usable frames from the bootloader's memory map.
 pub struct BootInfoFrameAllocator {
-    memory_map: &'static MemoryMap,
-    next: usize,
+    entry_cnt: usize,
+    ptr: NonNull<NonNullPtr<MemmapEntry>>,
+    offset: usize,
 }
 
 impl BootInfoFrameAllocator {
@@ -60,45 +63,34 @@ impl BootInfoFrameAllocator {
     /// This function is unsafe because the caller must guarantee that the passed
     /// memory map is valid. The main requirement is that all frames that are marked
     /// as `USABLE` in it are really unused.
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(entry_cnt: usize, entries_ptr: NonNull<NonNullPtr<MemmapEntry>>) -> Self {
         BootInfoFrameAllocator {
-            memory_map,
-            next: 0,
+            entry_cnt,
+            ptr: entries_ptr,
+            offset: 0,
         }
-    }
-}
-
-impl BootInfoFrameAllocator {
-    /// Returns an iterator over the usable frames specified in the memory map.
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame> {
-        // get usable regions from memory map
-        let regions = self.memory_map.iter();
-        let usable_regions = regions
-            .filter(|r| r.region_type == MemoryRegionType::Usable);
-        // map each region to its address range
-        let addr_ranges = usable_regions
-            .map(|r| r.range.start_addr()..r.range.end_addr());
-        // transform to an iterator of frame start addresses
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-        // create `PhysFrame` types from the start addresses
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        while self.entry_cnt > self.offset {
+            let entry = unsafe { (*self.ptr.as_ptr()).as_ptr().add(self.offset) };
+            self.offset += 1;
+            if unsafe { (&*entry).typ == MemoryMapEntryType::Usable } {
+                return Some(PhysFrame::from_start_address(PhysAddr::new(entry as usize as u64)).unwrap());
+            }
+        }
+        None
     }
 }
 
-pub fn setup(memory_map: &'static MemoryMap, physical_memory_offset: u64) -> (OffsetPageTable, BootInfoFrameAllocator) {
+pub fn setup(entry_cnt: usize, entries_ptr: NonNull<NonNullPtr<MemmapEntry>>, physical_memory_offset: u64) -> (OffsetPageTable<'static>, BootInfoFrameAllocator) {
     let phys_mem_offset = VirtAddr::new(physical_memory_offset);
     // initialize a mapper
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe {
-        BootInfoFrameAllocator::init(memory_map)
+        BootInfoFrameAllocator::init(entry_cnt, entries_ptr)
     };
     crate::allocators::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");

@@ -8,7 +8,14 @@ pub unsafe trait Driver {
 
     unsafe fn init(&mut self, idt: &mut InterruptDescriptorTable) -> bool;
 
-    unsafe fn exit(&mut self);
+}
+
+/// Driver that waits in the background for hardware to handle hardware inputs
+pub unsafe trait BackgroundDriver {
+
+    unsafe fn enable(&mut self);
+
+    unsafe fn disable(&mut self);
 
 }
 
@@ -50,11 +57,6 @@ unsafe impl<T, A> Driver for CharDriver<T, A> {
     #[inline]
     unsafe fn init(&mut self, idt: &mut InterruptDescriptorTable) -> bool {
         self.0.init(idt)
-    }
-
-    #[inline]
-    unsafe fn exit(&mut self) {
-        self.0.exit()
     }
 }
 
@@ -144,11 +146,6 @@ unsafe impl<T, A> Driver for BlockDriver<T, A> {
     #[inline]
     unsafe fn init(&mut self, idt: &mut InterruptDescriptorTable) -> bool {
         self.0.init(idt)
-    }
-
-    #[inline]
-    unsafe fn exit(&mut self) {
-        self.0.exit()
     }
 }
 

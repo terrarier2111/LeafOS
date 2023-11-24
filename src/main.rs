@@ -5,15 +5,16 @@
 #![reexport_test_harness_main = "test_main"]
 #![feature(const_mut_refs)]
 #![feature(strict_provenance)]
+#![feature(sync_unsafe_cell)]
 
 extern crate alloc;
 
 mod serial;
 
 use core::panic::PanicInfo;
-use bootloader::{BootInfo, entry_point};
-use x86::syscall;
-use LeafOS::{hlt_loop, memory, println, scheduler};
+use core::ptr::NonNull;
+use x86::{syscall, halt};
+use LeafOS::{hlt_loop, memory, println, scheduler, vga_buffer};
 use LeafOS::drivers::pit;
 use LeafOS::interrupts::init_apic;
 use LeafOS::scheduler::SCHEDULER_TIMER_DELAY;
@@ -25,22 +26,63 @@ use LeafOS::syscall::{do_syscall_3, STDOUT_FD, WRITE};
 // cargo bootimage --release --target x86_64_target.json -Z build-std=core,compiler_builtins,alloc -Z build-std-features=compiler-builtins-mem
 // qemu-system-x86_64 -d int -D ./qemu_logs -no-reboot -M smm=off -drive format=raw,file=target/x86_64_target/release/bootimage-LeafOS.bin
 
-entry_point!(kernel_main);
+static MEM_REQUEST: limine::MemmapRequest = limine::MemmapRequest::new(0);
+static ADDRESS_REQUEST: limine::KernelAddressRequest = limine::KernelAddressRequest::new(0);
+static FRAMEBUFFER_REQUEST: limine::FramebufferRequest = limine::FramebufferRequest::new(0);
+/// Sets the base revision to 1, this is recommended as this is the latest base revision described
+/// by the Limine boot protocol specification. See specification for further info.
+static BASE_REVISION: limine::BaseRevision = limine::BaseRevision::new(1);
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+#[no_mangle]
+unsafe extern "C" fn _start() -> ! {
+    assert!(BASE_REVISION.is_supported());
+
+    if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response().get() {
+        if framebuffer_response.framebuffer_count < 1 {
+            loop {}
+        }
+
+        // Get the first framebuffer's information.
+        let framebuffer = &framebuffer_response.framebuffers()[0];
+
+        for i in 0..100_usize {
+            // Calculate the pixel offset using the framebuffer information we obtained above.
+            // We skip `i` scanlines (pitch is provided in bytes) and add `i * 4` to skip `i` pixels forward.
+            let pixel_offset = i * framebuffer.pitch as usize + i * 4;
+
+            // Write 0xFFFFFFFF to the provided pixel offset to fill it white.
+            // We can safely unwrap the result of `as_ptr()` because the framebuffer address is
+            // guaranteed to be provided by the bootloader.
+            unsafe {
+                *(framebuffer.address.as_ptr().unwrap().add(pixel_offset) as *mut u32) = 0xFFFFFFFF;
+            }
+        }
+    }
+
+    let phys_reponse = ADDRESS_REQUEST.get_response().get().unwrap();
+    let physical_offset = phys_reponse.physical_base;
+    let virtual_offset = phys_reponse.virtual_base;
+
+    // vga_buffer::setup(physical_offset as usize);
+
     // we disable interrupts for the start so no unexpected shinanigans can occour
     // x86_64::instructions::interrupts::disable();
     // this function is the entry point, since the linker looks for a function
     // named `_start` by default
     println!("Initializing...");
 
+    loop {
+        halt();
+    }
+
     LeafOS::init();
 
     println!("Initialization succeeded!");
 
-    let (table, allocator) = memory::setup(&boot_info.memory_map, boot_info.physical_memory_offset);
+    let mem = MEM_REQUEST.get_response().get().unwrap();
+    let (table, allocator) = memory::setup(mem.entry_count as usize, unsafe { NonNull::new_unchecked(mem.entries.as_ptr()) }, physical_offset);
     scheduler::init();
-    unsafe { init_apic(boot_info.physical_memory_offset); }
+    unsafe { init_apic(physical_offset); }
     pit::init();
     LeafOS::interrupts::start_timer_one_shot(SCHEDULER_TIMER_DELAY);
 

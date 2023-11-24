@@ -20,26 +20,18 @@ panic = "abort" # disable stack unwinding on panic
 # [package.metadata.bootimage]
 # test-args = ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
 
-[package.metadata.bootimage]
-test-args = [
-    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
-    "-display", "none"
-]
-test-success-exit-code = 33         # (0x10 << 1) | 1
-test-timeout = 300                  # (in seconds)
-
 [dependencies]
 # bootloader = { version = "0.9.8", features = ["map_physical_memory"] }
 # bootloader = "0.10.12"
-bootloader = { version = "0.9.22", features = ["map_physical_memory"] }
+# bootloader = { version = "0.9.22", features = ["map_physical_memory"] }
 volatile = "0.2.7"
 lazy_static = { version = "1.4.0", features = ["spin_no_std"] }
-spin = "0.7.1"
+spin = "0.9.8"
 x86_64 = "0.14.9" # FIXME: Remove memory related usages and usages related to VirtAddr
 x86 = "0.47.0"
-riscv = "0.7.0"
+riscv = "0.10.1"
 # cortex-m = "0.7.4"
-cortex-a = "7.2.0"
+cortex-a = "8.1.1"
 uart_16550 = "0.2.16" # used to send stuff over qemu to the host computer
 pic8259 = "0.10.2"
 pc-keyboard = "0.5.1"
@@ -47,3 +39,5 @@ linked_list_allocator = "0.9.1"
 # bit_field = "0.10.1"
 x2apic = "0.4.0"
 raw-cpuid = "10.3.0"
+limine = "0.1.12"
+fontdue = "0.7.3"
