@@ -37,7 +37,7 @@ static BASE_REVISION: limine::BaseRevision = limine::BaseRevision::new(1);
 unsafe extern "C" fn _start() -> ! {
     assert!(BASE_REVISION.is_supported());
 
-    if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response().get() {
+    /*if let Some(framebuffer_response) = FRAMEBUFFER_REQUEST.get_response().get() {
         if framebuffer_response.framebuffer_count < 1 {
             loop {}
         }
@@ -57,7 +57,9 @@ unsafe extern "C" fn _start() -> ! {
                 *(framebuffer.address.as_ptr().unwrap().add(pixel_offset) as *mut u32) = 0xFFFFFFFF;
             }
         }
-    }
+    }*/
+
+    println!("Initializing...");
 
     let phys_reponse = ADDRESS_REQUEST.get_response().get().unwrap();
     let physical_offset = phys_reponse.physical_base;
@@ -69,18 +71,17 @@ unsafe extern "C" fn _start() -> ! {
     // x86_64::instructions::interrupts::disable();
     // this function is the entry point, since the linker looks for a function
     // named `_start` by default
-    println!("Initializing...");
 
     loop {
         halt();
     }
-
     LeafOS::init();
-
-    println!("Initialization succeeded!");
 
     let mem = MEM_REQUEST.get_response().get().unwrap();
     let (table, allocator) = memory::setup(mem.entry_count as usize, unsafe { NonNull::new_unchecked(mem.entries.as_ptr()) }, physical_offset);
+
+    println!("Initialization succeeded!");
+
     scheduler::init();
     unsafe { init_apic(physical_offset); }
     pit::init();

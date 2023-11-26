@@ -4,6 +4,9 @@ use limine::{MemmapEntry, NonNullPtr, MemoryMapEntryType};
 use x86_64::{PhysAddr, structures::paging::PageTable, VirtAddr};
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Page, PhysFrame, Size4KiB};
 use crate::memory;
+use crate::sc_cell::SCCell;
+
+static HHDM_OFFSET: SCCell<usize> = SCCell::new(0);
 
 // The bigger the number of a page table, the larger the memory region (level 4 contains multiple level 3 etc.)
 // Virtual memory blocks: pages
@@ -16,7 +19,7 @@ use crate::memory;
 /// complete physical memory is mapped to virtual memory at the passed
 /// `physical_memory_offset`. Also, this function must be only called once
 /// to avoid aliasing `&mut` references (which is undefined behavior).
-unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
+unsafe fn active_level_4_table(hhdm_offset: usize)
                                    -> &'static mut PageTable
 {
     use x86_64::registers::control::Cr3;
@@ -24,10 +27,9 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
     let (level_4_table_frame, _) = Cr3::read();
 
     let phys = level_4_table_frame.start_address();
-    let virt = physical_memory_offset + phys.as_u64();
-    let page_table_ptr: *mut PageTable = virt.as_mut_ptr();
+    let virt = hhdm_offset as u64 + phys.as_u64();
 
-    &mut *page_table_ptr // unsafe
+    &mut *(page_table_ptr as *mut PageTable)
 }
 
 /// Initialize a new OffsetPageTable.
@@ -36,8 +38,9 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr)
 /// complete physical memory is mapped to virtual memory at the passed
 /// `physical_memory_offset`. Also, this function must only be called once
 /// to avoid aliasing `&mut` references (which is undefined behavior).
-pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
-    let level_4_table = active_level_4_table(physical_memory_offset);
+pub unsafe fn init(hhdm_offset: usize) -> OffsetPageTable<'static> {
+    HHDM_OFFSET.set(hhdm_offset);
+    let level_4_table = active_level_4_table(hhdm_offset);
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
 
@@ -55,6 +58,7 @@ pub struct BootInfoFrameAllocator {
     entry_cnt: usize,
     ptr: NonNull<NonNullPtr<MemmapEntry>>,
     offset: usize,
+    entry_offset: usize,
 }
 
 impl BootInfoFrameAllocator {
@@ -68,6 +72,7 @@ impl BootInfoFrameAllocator {
             entry_cnt,
             ptr: entries_ptr,
             offset: 0,
+            entry_offset: 0,
         }
     }
 }
@@ -76,10 +81,18 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
     fn allocate_frame(&mut self) -> Option<PhysFrame> {
         while self.entry_cnt > self.offset {
             let entry = unsafe { (*self.ptr.as_ptr()).as_ptr().add(self.offset) };
-            self.offset += 1;
-            if unsafe { (&*entry).typ == MemoryMapEntryType::Usable } {
-                return Some(PhysFrame::from_start_address(PhysAddr::new(entry as usize as u64)).unwrap());
+            if unsafe { (&*entry).typ != MemoryMapEntryType::Usable } {
+                self.offset += 1;
+                continue;
             }
+            // divide by 4096 by shifting
+            if unsafe { ((&*entry).len >> 12) > self.entry_offset }  {
+                let entry_offset = self.entry_offset;
+                self.entry_offset += 1;
+                return Some(PhysFrame::from_start_address(PhysAddr::new(unsafe { (&*entry).base + entry_offset } as usize as u64)).unwrap());
+            }
+            self.offset += 1;
+            self.entry_offset = 0;
         }
         None
     }
@@ -95,4 +108,9 @@ pub fn setup(entry_cnt: usize, entries_ptr: NonNull<NonNullPtr<MemmapEntry>>, ph
     crate::allocators::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
     (mapper, frame_allocator)
+}
+
+#[inline]
+pub fn get_hddm_offset() -> usize {
+    HHDM_OFFSET.get()
 }

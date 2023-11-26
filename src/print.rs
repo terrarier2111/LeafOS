@@ -18,12 +18,5 @@ macro_rules! println {
 #[inline(never)]
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    use core::fmt::Write;
-    without_interrupts(|| {
-        if has_shell() {
-            SHELL.lock().write_fmt(args).unwrap();
-        } else {
-            WRITER.lock().write_fmt(args).unwrap();
-        }
-    });
+    crate::serial::_print(args);
 }

@@ -40,7 +40,9 @@ pub mod syscall;
 pub mod error_codes;
 pub mod text_renderer;
 pub mod conc_once_cell;
-pub mod sized_box;
+pub mod util;
+pub mod sc_cell;
+pub mod frame_allocator;
 
 pub fn init() {
     gdt::init();
