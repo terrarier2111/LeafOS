@@ -43,6 +43,7 @@ pub mod conc_once_cell;
 pub mod util;
 pub mod sc_cell;
 pub mod frame_allocator;
+pub mod per_cpu;
 
 pub fn init() {
     gdt::init();

@@ -40,6 +40,10 @@
 // store the number of used pages. This will however introduce 1 additional atomic rmw operation
 // on every alloc/free call.
 // To maintain this additional metadata a chunk type indicator has to be stored in every chunk.
+// Note that in this design if there is a request for 63 free pages (on a 64 bit system) and the occupation looks like this: [1100..[60*0]], [[62*0]..11], ..
+// then no suitable page would be found although there is enough storage. This is because the metadata of things that are allocated may not overlap.
+// (except if the size is suitably large - for example for a request of 100 pages, 2 pieces of metadata could be used).
+// Also note that it's not possible to allocate metadata as needed (on-the-fly) as that would require us to store pointers to the regions.
 
 
 use core::{sync::atomic::AtomicUsize, ptr::NonNull};
@@ -48,7 +52,7 @@ use crate::{sc_cell::SCCell, util::build_bit_mask};
 
 pub struct FrameAllocator {
     used_pages: AtomicUsize,
-
+    initial_layer: Layer,
 }
 
 impl FrameAllocator {
@@ -57,10 +61,15 @@ impl FrameAllocator {
     pub const fn new() -> Self {
         Self {
             used_pages: AtomicUsize::new(0),
+            initial_layer: todo!(),
         }
     }
 
-    pub fn alloc_frames(frame_cnt: usize) -> *mut () {
+    pub fn alloc_frames(&self, frame_cnt: usize) -> *mut () {
+
+    }
+
+    pub fn dealloc_frames(&self, ptr: *mut (), frame_cnt: usize) {
 
     }
 
@@ -96,14 +105,14 @@ const LAYER_TY_INFO_OFFSET: usize = (LayerTy::Last as usize).trailing_zeros();
 #[repr(usize)]
 enum LayerTy {
     Normal = 0,
-    Emptied = 1,
+    // Emptied = 1,
     Last,
 }
 
 impl LayerTy {
 
     const SIZE: usize = Self::Last as usize;
-    const MAPPING: [LayerTy; Self::SIZE] = [Self::Normal, Self::Emptied];
+    const MAPPING: [LayerTy; Self::SIZE] = [Self::Normal/*, Self::Emptied*/];
 
     #[inline]
     const fn from_raw(raw: usize) -> Self {
@@ -115,47 +124,204 @@ impl LayerTy {
 struct Layer {
     info: LayerInfo,
     // this looks up where in our metadata there is a free entry
-    top_lookup: AtomicUsize, // FIXME: it will probably be very hard to maintain this without races from lower_lookup, we could detect when setting a bit raced with
+    any_free_top_lookup: AtomicUsize, // FIXME: it will probably be very hard to maintain this without races from lower_lookup, we could detect when setting a bit raced with
                              // the bit being unset and somehow handle such a race
     any_free: [AtomicUsize; METADATA_WORDS],
+    all_free_top_lookup: AtomicUsize,
     all_free: [AtomicUsize; METADATA_WORDS],
 }
 
 impl Layer {
 
-    fn alloc(&self, size: usize) -> Option<NonNull<()>> {
-        
+    fn new(info: LayerInfo) -> Self {
+        Self {
+            info,
+            any_free_top_lookup: AtomicUsize::new(usize::MAX),
+            any_free: [AtomicUsize::new(usize::MAX); METADATA_WORDS],
+            all_free_top_lookup: AtomicUsize::new(usize::MAX),
+            all_free: [AtomicUsize::new(usize::MAX); METADATA_WORDS],
+        }
     }
 
-    fn find_free_consecutive(&self, pages: usize) -> Option<NonNull<()>> {
-        let top_rows = pages.div_ceil(usize::BITS);
-        
-        let bitset = self.top_lookup.load(core::sync::atomic::Ordering::Acquire);
-        let mut ret = bitset;
-        for i in 1..pages {
-            ret &= (bitset >> i);
+    fn alloc(&self, size: usize, this_base: *mut ()) -> Option<NonNull<()>> {
+        let own_pages = size.div_ceil(LAYER_MULTIPLIERS[self.info.id()]);
+        let excess_pages = own_pages * LAYER_MULTIPLIERS[self.info.id()] - size;
+        self.find_free_consecutive(this_base, own_pages, excess_pages)
+    }
+
+    fn find_free_any(&self, this_base: *mut (), pages: usize) -> Option<NonNull<()>> {
+        'outer: loop {            
+            let bitset = self.any_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+
+            if bitset == 0 {
+                return None;
+            }
+
+            let set = 1 << bitset.trailing_zeros();
+            let last_page = ret.trailing_zeros() as usize;
+            loop {
+                let prev = self.all_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+                // try claiming the whole range for us in the most general list (the one with the weakest guarantees)
+                match self.all_free_top_lookup.compare_exchange_weak(prev, prev & !set, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed) {
+                    Ok(_) => break 'outer,
+                    Err(err) => {
+                        if err & set != set {
+                            continue 'outer;
+                        }
+                    },
+                }
+            }
+            if self.any_free_top_lookup.load(core::sync::atomic::Ordering::Acquire) & set == 0 {
+                // the page we tried to allocate was just allocated by somebody else :(
+                // retry allocating an entry
+                continue;
+            }
+            // now we know nobody could claim pages from this list, so update it.
+            let curr_pages = pages.div_ceil(LAYER_MULTIPLIERS[self.info.id()]);
+            let mut free_bits = self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].load(core::sync::atomic::Ordering::Acquire);
+            loop {
+                let bitset = {
+                    let mut bitset = free_bits;
+                    for i in 1..curr_pages {
+                        bitset &= free_bits >> 1;
+                    }
+                    bitset
+                };
+                if free_bits == 0 {
+                    continue 'outer;
+                }
+                let base_bitset = 1 << bitset.trailing_zeros();
+                    let mut bitset = base_bitset;
+                    for i in 1..curr_pages {
+                        bitset |= base_bitset << i;
+                    }
+                    match self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].compare_exchange(free_bits, free_bits & !bitset, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed) {
+                        Ok(_) => {
+                            let sub_pages = curr_pages * LAYER_MULTIPLIERS[self.info.id()] - pages;
+                            // FIXME: handle cases in which we don't need a full page and just need a couple subpages
+                            break 'outer;
+                        },
+                        Err(err) => {
+                            free_bits = err;
+                        },
+                    }
+            }
         }
 
+        Some(unsafe { NonNull::new_unchecked(base.cast::<u8>().add(LAYER_MULTIPLIERS[self.info.id()] * (1 << ret.trailing_zeros())).cast::<()>()) })
+    }
+
+    /// Finds consecutive bits and allocates them, lower_excess_pages denotes how many sub pages of the last page
+    /// are not required and can be made available to other callers.
+    fn find_free_consecutive(&self, base: *mut (), pages: usize, lower_excess_pages: usize) -> Option<NonNull<()>> {
+        'outer: loop {
+            let top_rows = pages.div_ceil(usize::BITS);
+            let excess_pages = pages * usize::BITS as usize - pages;
+            
+            let mut bitset = self.all_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+            let mut ret = bitset;
+            for i in 1..pages {
+                ret &= (bitset >> i);
+            }
+
+            if ret == 0 {
+                return None;
+            }
+
+            let set = 1 << ret.trailing_zeros();
+            let set = {
+                let base_set = set;
+                let mut set = set;
+                for i in 1..pages {
+                    set |= base_set << i;
+                }
+                set
+            };
+            let last_page = ret.trailing_zeros() as usize + pages - 1;
+            loop {
+                // try claiming the whole range for us in the most general list (the one with the weakest guarantees)
+                match self.any_free_top_lookup.compare_exchange_weak(bitset, bitset & !set, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed) {
+                    Ok(_) => break 'outer,
+                    Err(err) => {
+                        if err & set != set {
+                            continue 'outer;
+                        }
+                        bitset = self.all_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+                    },
+                }
+            }
+            // now we know nobody could claim pages from this list, so update it.
+            self.all_free_top_lookup.fetch_and(!set, core::sync::atomic::Ordering::AcqRel);
+            if excess_pages > 0 {
+                let mut bit_set = 0;
+                for i in 0..excess_pages {
+                    bitset |= usize::BITS - 1 - i;
+                }
+                self.any_free[last_page].fetch_and(bit_set, core::sync::atomic::Ordering::Relaxed);
+            }
+            // FIXME: could this be reordered before the fetch_and on all_free_top_lookup?
+            self.any_free_top_lookup.fetch_or(1 << last_page, core::sync::atomic::Ordering::AcqRel);
+            // FIXME: use lower_excess_pages to free up more space
+            break;
+        }
+
+        Some(unsafe { NonNull::new_unchecked(base.cast::<u8>().add(LAYER_MULTIPLIERS[self.info.id()] * (1 << ret.trailing_zeros())).cast::<()>()) })
+    }
+
+     /// Frees `pages` pages starting from `start`
+     fn free_at(&self, offset: usize, pages: usize) {
+        let entry = offset.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
+        let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
+
+        if entry_cnt > 0 {
+
+        }
+    }
+
+     /// Frees `pages` pages starting from the start
+     fn free_from_start(&self, cnt: usize) {
+        let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
+
+        if entry_cnt > 0 {
+
+        }
+    }
+
+    /// Frees `cnt` pages starting from `start`
+    fn free_from_end(&self, cnt: usize) {
+        let entry = offset.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
+        let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
+
+        if entry_cnt > 0 {
+
+        }
     }
 
 }
 
 struct FinalLayer {
     // this looks up where in our metadata there is a free entry
-    top_lookup: AtomicUsize, // FIXME: it will probably be very hard to maintain this without races from lower_lookup, we could detect when setting a bit raced with
+    all_free_top_lookup: AtomicUsize,
+    any_free_top_lookup: AtomicUsize, // FIXME: it will probably be very hard to maintain this without races from lower_lookup, we could detect when setting a bit raced with
                              // the bit being unset and somehow handle such a race
     lower_lookup: [AtomicUsize; METADATA_WORDS],
 }
 
 impl FinalLayer {
 
-
+    fn free(&self) {
+        
+    }
 
 }
 
-const LAYER_MULTIPLIERS: [usize; 4] = [0, 0, 0, 0]; // FIXME: implement this!
+const LAYER_MULTIPLIERS: [usize; 3] = [
+    ENTRIES_PER_INDIRECTION * ENTRIES_PER_INDIRECTION * ENTRIES_PER_INDIRECTION,
+    ENTRIES_PER_INDIRECTION * ENTRIES_PER_INDIRECTION,
+    ENTRIES_PER_INDIRECTION
+];
 
-const ENTRIES_PER_INDIRECTION: usize = 4096;
-const METADATA_WORDS: usize = ENTRIES_PER_INDIRECTION / usize::BITS;
+const ENTRIES_PER_INDIRECTION: usize = usize::BITS as usize * usize::BITS as usize;
+const METADATA_WORDS: usize = ENTRIES_PER_INDIRECTION / usize::BITS as usize;
 
 
