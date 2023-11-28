@@ -46,7 +46,7 @@
 // Also note that it's not possible to allocate metadata as needed (on-the-fly) as that would require us to store pointers to the regions.
 
 
-use core::{sync::atomic::AtomicUsize, ptr::NonNull};
+use core::{sync::atomic::{AtomicUsize, Ordering}, ptr::NonNull};
 
 use crate::{sc_cell::SCCell, util::build_bit_mask};
 
@@ -151,7 +151,7 @@ impl Layer {
 
     fn find_free_any(&self, this_base: *mut (), pages: usize) -> Option<NonNull<()>> {
         'outer: loop {            
-            let bitset = self.any_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+            let bitset = self.any_free_top_lookup.load(Ordering::Acquire);
 
             if bitset == 0 {
                 return None;
@@ -159,26 +159,27 @@ impl Layer {
 
             let set = 1 << bitset.trailing_zeros();
             let last_page = ret.trailing_zeros() as usize;
+            let mut prev = self.all_free_top_lookup.load(Ordering::Acquire);
             loop {
-                let prev = self.all_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
                 // try claiming the whole range for us in the most general list (the one with the weakest guarantees)
-                match self.all_free_top_lookup.compare_exchange_weak(prev, prev & !set, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed) {
+                match self.all_free_top_lookup.compare_exchange_weak(prev, prev & !set, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) => break 'outer,
                     Err(err) => {
                         if err & set != set {
                             continue 'outer;
                         }
+                        prev = err;
                     },
                 }
             }
-            if self.any_free_top_lookup.load(core::sync::atomic::Ordering::Acquire) & set == 0 {
+            if self.any_free_top_lookup.load(Ordering::Acquire) & set == 0 {
                 // the page we tried to allocate was just allocated by somebody else :(
                 // retry allocating an entry
                 continue;
             }
             // now we know nobody could claim pages from this list, so update it.
             let curr_pages = pages.div_ceil(LAYER_MULTIPLIERS[self.info.id()]);
-            let mut free_bits = self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].load(core::sync::atomic::Ordering::Acquire);
+            let mut free_bits = self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].load(Ordering::Acquire);
             loop {
                 let bitset = {
                     let mut bitset = free_bits;
@@ -195,7 +196,7 @@ impl Layer {
                     for i in 1..curr_pages {
                         bitset |= base_bitset << i;
                     }
-                    match self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].compare_exchange(free_bits, free_bits & !bitset, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed) {
+                    match self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].compare_exchange(free_bits, free_bits & !bitset, Ordering::AcqRel, Ordering::Acquire) {
                         Ok(_) => {
                             let sub_pages = curr_pages * LAYER_MULTIPLIERS[self.info.id()] - pages;
                             // FIXME: handle cases in which we don't need a full page and just need a couple subpages
@@ -218,7 +219,7 @@ impl Layer {
             let top_rows = pages.div_ceil(usize::BITS);
             let excess_pages = pages * usize::BITS as usize - pages;
             
-            let mut bitset = self.all_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+            let mut bitset = self.all_free_top_lookup.load(Ordering::Acquire);
             let mut ret = bitset;
             for i in 1..pages {
                 ret &= (bitset >> i);
@@ -240,27 +241,27 @@ impl Layer {
             let last_page = ret.trailing_zeros() as usize + pages - 1;
             loop {
                 // try claiming the whole range for us in the most general list (the one with the weakest guarantees)
-                match self.any_free_top_lookup.compare_exchange_weak(bitset, bitset & !set, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Relaxed) {
+                match self.any_free_top_lookup.compare_exchange_weak(bitset, bitset & !set, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) => break 'outer,
                     Err(err) => {
                         if err & set != set {
                             continue 'outer;
                         }
-                        bitset = self.all_free_top_lookup.load(core::sync::atomic::Ordering::Acquire);
+                        bitset = self.all_free_top_lookup.load(Ordering::Acquire);
                     },
                 }
             }
             // now we know nobody could claim pages from this list, so update it.
-            self.all_free_top_lookup.fetch_and(!set, core::sync::atomic::Ordering::AcqRel);
+            self.all_free_top_lookup.fetch_and(!set, Ordering::AcqRel);
             if excess_pages > 0 {
                 let mut bit_set = 0;
                 for i in 0..excess_pages {
                     bitset |= usize::BITS - 1 - i;
                 }
-                self.any_free[last_page].fetch_and(bit_set, core::sync::atomic::Ordering::Relaxed);
+                self.any_free[last_page].fetch_and(bit_set, Ordering::Relaxed);
             }
             // FIXME: could this be reordered before the fetch_and on all_free_top_lookup?
-            self.any_free_top_lookup.fetch_or(1 << last_page, core::sync::atomic::Ordering::AcqRel);
+            self.any_free_top_lookup.fetch_or(1 << last_page, Ordering::AcqRel);
             // FIXME: use lower_excess_pages to free up more space
             break;
         }
@@ -269,7 +270,47 @@ impl Layer {
     }
 
      /// Frees `pages` pages starting from `start`
-     fn free_at(&self, offset: usize, pages: usize) {
+     fn free_at<const FROM_LEFT: bool>(&self, offset: usize, pages: usize) {
+        let multiplier = LAYER_MULTIPLIERS[self.info.id()];
+        let entry = if FROM_LEFT { offset.div_floor(multiplier) } else { offset.div_ceil(multiplier) };
+        let entry_cnt = pages.div_floor(multiplier);
+        let top_entry_cnt = entry_cnt.div_floor(usize::BITS);
+        let entry_cnt = entry_cnt - top_entry_cnt * usize::BITS as usize;
+
+        if entry_cnt > 0 {
+            if top_entry_cnt > 0 {
+                let top_set = {
+                    let mut ret = 0;
+                    for i in 0..top_entry_cnt {
+                        ret |= 1 << i;
+                    }
+                    ret << entry
+                };
+                self.all_free_top_lookup.fetch_or(top_set, Ordering::AcqRel);
+                self.any_free_top_lookup.fetch_or(top_set, Ordering::AcqRel);
+            }
+            // FIXME: set sub bits.
+            let off = if FROM_LEFT {
+                entry
+            } else {
+                ENTRIES_PER_INDIRECTION - entry
+            };
+            let bitset = 1 << (entry_cnt + 1);
+        }
+    }
+
+     /// Frees `pages` pages starting from the start
+     fn free_from_start(&self, pages: usize) {
+        self.free_at::<true>(0, pages);
+    }
+
+    /// Frees `cnt` pages starting from `start`
+    fn free_from_end(&self, pages: usize) {
+        self.free_at::<false>(0, pages);
+    }
+
+    /// Frees `pages` pages starting from `start`
+    fn free_at_clear_other<const FROM_LEFT: bool>(&self, offset: usize, pages: usize) {
         let entry = offset.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
         let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
 
@@ -279,16 +320,23 @@ impl Layer {
     }
 
      /// Frees `pages` pages starting from the start
-     fn free_from_start(&self, cnt: usize) {
+     fn free_from_start_clear_other(&self, cnt: usize) {
         let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
 
         if entry_cnt > 0 {
-
+            let top_set = {
+                let mut ret = 0;
+                for i in 0..entry_cnt {
+                    ret |= 1 << i;
+                }
+                ret
+            };
+            self.any_free_top_lookup.fetch
         }
     }
 
     /// Frees `cnt` pages starting from `start`
-    fn free_from_end(&self, cnt: usize) {
+    fn free_from_end_clear_other(&self, cnt: usize) {
         let entry = offset.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
         let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
 
