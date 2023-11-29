@@ -257,7 +257,7 @@ impl Layer {
     }
 
      /// Frees `pages` pages starting from `start`
-     fn free_at<const FROM_LEFT: bool>(&self, base: *mut (), offset: usize, pages: usize) {
+     fn free_at<const FROM_LEFT: bool, const CLEAR_OTHER: bool>(&self, base: *mut (), offset: usize, pages: usize) {
         let multiplier = LAYER_MULTIPLIERS[self.info.id()];
         let entry = if FROM_LEFT { offset.div_floor(multiplier) } else { offset.div_ceil(multiplier) };
         let entry_cnt_base = pages.div_floor(multiplier);
@@ -265,17 +265,6 @@ impl Layer {
         let entry_cnt = entry_cnt_base - top_entry_cnt * usize::BITS as usize;
 
         if entry_cnt > 0 {
-            if top_entry_cnt > 0 {
-                let top_set = {
-                    let mut ret = 0;
-                    for i in 0..top_entry_cnt {
-                        ret |= 1 << i;
-                    }
-                    ret << entry
-                };
-                self.all_free_top_lookup.fetch_or(top_set, Ordering::AcqRel);
-                self.any_free_top_lookup.fetch_or(top_set, Ordering::AcqRel);
-            }
             let off = if FROM_LEFT {
                 entry
             } else {
@@ -286,16 +275,25 @@ impl Layer {
             } else {
                 usize::BITS - entry_cnt
             }, entry_cnt);
-            self.all_free[entry].fetch_or(bitset, Ordering::AcqRel);
+            if CLEAR_OTHER {
+                self.all_free[entry].store(bitset, Ordering::Release);
+            } else {
+                self.all_free[entry].fetch_or(bitset, Ordering::AcqRel);
+            }
             let remaining = pages - entry_cnt_base * multiplier;
             let sub_ptr = unsafe { base.byte_add(entry_cnt_base * multiplier) };
             let addr = LAYER_START_ADDRS[self.info.id() + 1].get().0;
             if self.info.id() < 2 {
                 let lower = unsafe { &*addr.cast::<Layer> };
-                lower.free_at::<FROM_LEFT>(sub_ptr, 0, remaining);
+                lower.free_at::<FROM_LEFT, CLEAR_OTHER>(sub_ptr, 0, remaining);
             } else {
                 let final = unsafe { &*addr.cast::<FinalLayer>() };
                 // FIXME: free
+            }
+            if top_entry_cnt > 0 {
+                let top_set = build_bit_mask(entry, top_entry_cnt);
+                self.all_free_top_lookup.fetch_or(top_set, Ordering::AcqRel);
+                self.any_free_top_lookup.fetch_or(top_set, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
             }
         }
     }
@@ -305,45 +303,24 @@ impl Layer {
         self.free_at::<true>(0, 0, pages);
     }
 
-    /// Frees `cnt` pages starting from `start`
+    /// Frees `cnt` pages starting from the end
     fn free_from_end(&self, pages: usize) {
-        self.free_at::<false>(0, pages);
+        self.free_at::<false>(0, 0, pages);
     }
 
     /// Frees `pages` pages starting from `start`
     fn free_at_clear_other<const FROM_LEFT: bool>(&self, offset: usize, pages: usize) {
-        let entry = offset.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
-        let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
-
-        if entry_cnt > 0 {
-
-        }
+        
     }
 
      /// Frees `pages` pages starting from the start
-     fn free_from_start_clear_other(&self, cnt: usize) {
-        let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
-
-        if entry_cnt > 0 {
-            let top_set = {
-                let mut ret = 0;
-                for i in 0..entry_cnt {
-                    ret |= 1 << i;
-                }
-                ret
-            };
-            self.any_free_top_lookup.fetch
-        }
+     fn free_from_start_clear_other(&self, pages: usize) {
+        self.free_at_clear_other(0, pages);
     }
 
-    /// Frees `cnt` pages starting from `start`
+    /// Frees `cnt` pages starting from the end
     fn free_from_end_clear_other(&self, cnt: usize) {
-        let entry = offset.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
-        let entry_cnt = cnt.div_floor(LAYER_MULTIPLIERS[self.info.id()]);
-
-        if entry_cnt > 0 {
-
-        }
+        self.free_at_clear_other(0, cnt);
     }
 
 }
