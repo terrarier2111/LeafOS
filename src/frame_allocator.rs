@@ -44,6 +44,9 @@
 // then no suitable page would be found although there is enough storage. This is because the metadata of things that are allocated may not overlap.
 // (except if the size is suitably large - for example for a request of 100 pages, 2 pieces of metadata could be used).
 // Also note that it's not possible to allocate metadata as needed (on-the-fly) as that would require us to store pointers to the regions.
+// Even if the all_free metadata optimization would be a tremendous improvement for the runtime, the actual implementation is not easy/possible
+// with the decribed metadata design because of various opportunities for data races. But the good thing is we may still be able to employ
+// this technique for per-cpu chunks, as there won't be parallel allocations, only 1 allocation and N frees at a time.
 
 
 use core::{sync::atomic::{AtomicUsize, Ordering}, ptr::{NonNull, null_mut}};
@@ -52,7 +55,7 @@ use crate::{sc_cell::SCCell, util::{build_bit_mask, SyncPtrMut}};
 
 pub struct FrameAllocator {
     used_pages: AtomicUsize,
-    initial_layer: Layer,
+    initial_layer: GenericLayer,
 }
 
 impl FrameAllocator {
@@ -123,7 +126,7 @@ impl LayerTy {
 
 static LAYER_START_ADDRS: [SCCell<SyncPtrMut<()>>; 4] = [SCCell::new(SyncPtrMut(null_mut())); 4];
 
-struct Layer {
+struct GenericLayer {
     info: LayerInfo,
     // this looks up where in our metadata there is a free entry
     any_free_top_lookup: AtomicUsize, // FIXME: it will probably be very hard to maintain this without races from lower_lookup, we could detect when setting a bit raced with
@@ -133,7 +136,7 @@ struct Layer {
     all_free: [AtomicUsize; METADATA_WORDS],
 }
 
-impl Layer {
+impl GenericLayer {
 
     fn new(info: LayerInfo) -> Self {
         Self {
@@ -152,6 +155,7 @@ impl Layer {
     }
 
     fn find_free_any(&self, this_base: *mut (), pages: usize) -> Option<NonNull<()>> {
+        let multiplier = LAYER_MULTIPLIERS[self.info.id()];
         'outer: loop {            
             let bitset = self.any_free_top_lookup.load(Ordering::Acquire);
 
@@ -163,7 +167,7 @@ impl Layer {
             let last_page = ret.trailing_zeros() as usize;
             let mut prev = self.all_free_top_lookup.load(Ordering::Acquire);
             loop {
-                // try claiming the whole range for us in the most general list (the one with the weakest guarantees)
+                // set the entry to not fully free
                 match self.all_free_top_lookup.compare_exchange_weak(prev, prev & !set, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) => break 'outer,
                     Err(err) => {
@@ -180,23 +184,21 @@ impl Layer {
                 continue;
             }
             // now we know nobody could claim pages from this list, so update it.
-            let curr_pages = pages.div_ceil(LAYER_MULTIPLIERS[self.info.id()]);
-            let mut free_bits = self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].load(Ordering::Acquire);
-            loop {
-                let bitset = {
-                    let mut bitset = free_bits;
-                    for i in 1..curr_pages {
-                        bitset &= free_bits >> 1;
+            let curr_pages_any = pages.div_ceil(multiplier);
+            let curr_pages_all = pages.div_floor(multiplier);
+            let mut free_bits_any = self.any_free[set * multiplier].load(Ordering::Acquire);
+            while free_bits_any != 0 {
+                let bitset_all = {
+                    let mut bitset = free_bits_any;
+                    for i in 1..curr_pages_all {
+                        bitset &= free_bits_any >> 1;
                     }
                     bitset
                 };
-                if free_bits == 0 {
-                    continue 'outer;
-                }
                 let bitset = build_bit_mask(bitset.trailing_zeros(), curr_pages);
-                match self.any_free[set * LAYER_MULTIPLIERS[self.info.id()]].compare_exchange(free_bits, free_bits & !bitset, Ordering::AcqRel, Ordering::Acquire) {
+                match self.any_free[set * multiplier].compare_exchange(free_bits_any, free_bits_any & !bitset, Ordering::AcqRel, Ordering::Acquire) {
                     Ok(_) => {
-                        let sub_pages = curr_pages * LAYER_MULTIPLIERS[self.info.id()] - pages;
+                        let sub_pages = curr_pages * multiplier - pages;
                         // FIXME: handle cases in which we don't need a full page and just need a couple subpages
                         break 'outer;
                     },
@@ -207,7 +209,7 @@ impl Layer {
             }
         }
 
-        Some(unsafe { NonNull::new_unchecked(base.cast::<u8>().add(LAYER_MULTIPLIERS[self.info.id()] * (1 << ret.trailing_zeros())).cast::<()>()) })
+        Some(unsafe { NonNull::new_unchecked(base.cast::<u8>().add(multiplier * (1 << ret.trailing_zeros())).cast::<()>()) })
     }
 
     /// Finds consecutive bits and allocates them, lower_excess_pages denotes how many sub pages of the last page
@@ -258,44 +260,7 @@ impl Layer {
 
      /// Frees `pages` pages starting from `start`
      fn free_at<const FROM_LEFT: bool, const CLEAR_OTHER: bool>(&self, base: *mut (), offset: usize, pages: usize) {
-        let multiplier = LAYER_MULTIPLIERS[self.info.id()];
-        let entry = if FROM_LEFT { offset.div_floor(multiplier) } else { offset.div_ceil(multiplier) };
-        let entry_cnt_base = pages.div_floor(multiplier);
-        let top_entry_cnt = entry_cnt_base.div_floor(usize::BITS);
-        let entry_cnt = entry_cnt_base - top_entry_cnt * usize::BITS as usize;
-
-        if entry_cnt > 0 {
-            let off = if FROM_LEFT {
-                entry
-            } else {
-                ENTRIES_PER_INDIRECTION - entry
-            };
-            let bitset = build_bit_mask(if FROM_LEFT {
-                0
-            } else {
-                usize::BITS - entry_cnt
-            }, entry_cnt);
-            if CLEAR_OTHER {
-                self.all_free[entry].store(bitset, Ordering::Release);
-            } else {
-                self.all_free[entry].fetch_or(bitset, Ordering::AcqRel);
-            }
-            let remaining = pages - entry_cnt_base * multiplier;
-            let sub_ptr = unsafe { base.byte_add(entry_cnt_base * multiplier) };
-            let addr = LAYER_START_ADDRS[self.info.id() + 1].get().0;
-            if self.info.id() < 2 {
-                let lower = unsafe { &*addr.cast::<Layer> };
-                lower.free_at::<FROM_LEFT, CLEAR_OTHER>(sub_ptr, 0, remaining);
-            } else {
-                let final = unsafe { &*addr.cast::<FinalLayer>() };
-                // FIXME: free
-            }
-            if top_entry_cnt > 0 {
-                let top_set = build_bit_mask(entry, top_entry_cnt);
-                self.all_free_top_lookup.fetch_or(top_set, Ordering::AcqRel);
-                self.any_free_top_lookup.fetch_or(top_set, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
-            }
-        }
+       
     }
 
      /// Frees `pages` pages starting from the start
@@ -326,6 +291,7 @@ impl Layer {
 }
 
 struct FinalLayer {
+    locked: AtomicUsize,
     // this looks up where in our metadata there is a free entry
     all_free_top_lookup: AtomicUsize,
     any_free_top_lookup: AtomicUsize, // FIXME: it will probably be very hard to maintain this without races from lower_lookup, we could detect when setting a bit raced with
@@ -335,10 +301,139 @@ struct FinalLayer {
 
 impl FinalLayer {
 
-    fn free(&self) {
+    fn find_free_any(&self, this_base: *mut (), pages: usize) -> Option<NonNull<()>> {
         
     }
 
+    /// Finds consecutive bits and allocates them, lower_excess_pages denotes how many sub pages of the last page
+    /// are not required and can be made available to other callers.
+    fn find_free_consecutive(&self, base: *mut (), pages: usize, lower_excess_pages: usize) -> Option<NonNull<()>> {
+        
+    }
+
+}
+
+pub trait Layer {
+
+    fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool, const FINAL_LAYER: bool>(&self, base: *mut (), offset: usize, pages: usize);
+
+}
+
+impl Layer for GenericLayer {
+    fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool, const FINAL_LAYER: bool>(&self, base: *mut (), offset: usize, pages: usize) {
+        let multiplier = LAYER_MULTIPLIERS[self.info.id()];
+
+        let (entry_all, bitset_entry_front_all, bitset_entry_back_all, remaining_front, remaining_back, bitset_top_all) = {
+            // say we have chunks of size 4 and top chunks of size 8 and all the 0 should be replaced with 1
+            // [1100000000000000]
+            // [..00..] first calculate the remaining front part (2 would be the amount of that in this case)
+            let remaining_front = multiplier - offset % multiplier;
+            // calculate how many full entries (that should be freed) will follow the front part
+            let entry_cnt_base = (pages - remaining_front).div_floor(multiplier);
+            // [..0000..] calculate the number of chunks until a full top level entry is reached
+            let entries_remaining_front = usize::BITS as usize - ((offset + remaining_front) / multiplier) % usize::BITS as usize; // FIXME: this assumes a size of at least usize::BITS
+            let top_entry_cnt = (entry_cnt_base - entries_remaining_front).div_floor(usize::BITS);
+            let remaining_back_all = pages - top_entry_cnt * multiplier - remaining_front;
+            let entries_remaining_back = remaining_back_all.div_floor(multiplier);
+            let remaining_back = remaining_back_all % multiplier;
+            let entry = offset.div_ceil(multiplier);
+            let off = if FROM_LEFT {
+                entry
+            } else {
+                ENTRIES_PER_INDIRECTION - 1 - entry
+            };
+            // we have to offset this as the entry is not the actual offset we want becasue of directionality
+            let top_off = if FROM_LEFT {
+                entry
+            } else {
+                usize::BITS - top_entry_cnt
+            };
+            let top_bitset = build_bit_mask(top_off, top_entry_cnt);
+
+            (off, entries_remaining_front, entries_remaining_back, remaining_front, remaining_back, top_bitset)
+        };
+
+        let (entry_any, bitset_entry_front_any, bitset_entry_back_any, bitset_top_any) = {
+            // FIXME: finish this up!
+            // say we have chunks of size 4 and top chunks of size 8 and all the 0 should be replaced with 1
+            // [1100000000000000]
+            // [..00..] first calculate the remaining front part (2 would be the amount of that in this case)
+            let remaining_front = multiplier - offset % multiplier;
+            // calculate how many full entries (that should be freed) will follow the front part
+            let entry_cnt_base = (pages - remaining_front).div_ceil(multiplier);
+            // [..0000..] calculate the number of chunks until a full top level entry is reached
+            let entries_remaining_front = usize::BITS as usize - ((offset + remaining_front) / multiplier) % usize::BITS as usize; // FIXME: this assumes a size of at least usize::BITS
+            let top_entry_cnt = (entry_cnt_base - entries_remaining_front).div_ceil(usize::BITS);
+            let remaining_back_all = pages - top_entry_cnt * multiplier - remaining_front;
+            let entries_remaining_back = remaining_back_all.div_floor(multiplier);
+            let entry = offset.div_floor(multiplier);
+            let off = if FROM_LEFT {
+                entry
+            } else {
+                ENTRIES_PER_INDIRECTION - 1 - entry
+            };
+            // we have to offset this as the entry is not the actual offset we want becasue of directionality
+            let top_off = if FROM_LEFT {
+                entry
+            } else {
+                usize::BITS - top_entry_cnt
+            };
+            let top_bitset = build_bit_mask(top_off, top_entry_cnt);
+
+            (off, entries_remaining_front, entries_remaining_back, top_bitset)
+        };
+
+        let entry = if FROM_LEFT { offset.div_floor(multiplier) } else { offset.div_ceil(multiplier) };
+        let entry_cnt_base_all = pages.div_floor(multiplier);
+        let top_entry_cnt_all = entry_cnt_base_all.div_floor(usize::BITS);
+        let entry_cnt_all = entry_cnt_base_all - top_entry_cnt_all * usize::BITS as usize;
+    
+        let off = if FROM_LEFT {
+            entry
+        } else {
+            ENTRIES_PER_INDIRECTION - entry
+        };
+        let bitset = build_bit_mask(if FROM_LEFT {
+            0
+        } else {
+            usize::BITS - entry_cnt_all
+        }, entry_cnt_all);
+        
+        if CLEAR_OTHER {
+            self.any_free[entry].store(bitset, Ordering::Release);
+            self.all_free[entry].store(bitset, Ordering::Release);
+        } else {
+            self.any_free[entry].fetch_or(bitset, Ordering::AcqRel);
+            self.all_free[entry].fetch_or(bitset, Ordering::AcqRel);
+        }
+        let remaining = pages - entry_cnt_base_all * multiplier;
+        if remaining != 0 {
+            let sub_ptr = unsafe { base.byte_add(entry_cnt_base_all * multiplier) };
+            let addr = LAYER_START_ADDRS[self.info.id() + 1].get().0;
+            if self.info.id() < 2 {
+                let lower = unsafe { &*addr.cast::<Layer> };
+                lower.free_at::<FROM_LEFT, CLEAR_OTHER>(sub_ptr, 0, remaining);
+            } else {
+                let final = unsafe { &*addr.cast::<FinalLayer>() };
+                // FIXME: free
+            }
+        }
+        if top_entry_cnt > 0 {
+            let top_set_all = build_bit_mask(entry, top_entry_cnt_all);
+            let top_set_any = build_bit_mask(entry, top_entry_cnt_any);
+            if CLEAR_OTHER {
+                self.all_free_top_lookup.store(top_set_all, Ordering::AcqRel);
+                self.any_free_top_lookup.store(top_set_any, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
+            } else {
+                self.all_free_top_lookup.fetch_or(top_set_all, Ordering::AcqRel);
+                self.any_free_top_lookup.fetch_or(top_set_any, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
+            }
+        }
+    }
+}
+
+fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool, const FINAL_LAYER: bool>(layer: *mut (), base: *mut (), offset: usize, pages: usize) {
+   
 }
 
 const LAYER_MULTIPLIERS: [usize; 3] = [
