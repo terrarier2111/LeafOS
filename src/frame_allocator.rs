@@ -328,14 +328,16 @@ impl Layer for GenericLayer {
             // [1100000000000000]
             // [..00..] first calculate the remaining front part (2 would be the amount of that in this case)
             let remaining_front = multiplier - offset % multiplier;
+            // [110000..] calculate the number of chunks until a full top level entry is reached
+            let remaining_entries_front = (multiplier * usize::BITS as usize) - (offset + remaining_front) % (multiplier * usize::BITS as usize);
+
             // calculate how many full entries (that should be freed) will follow the front part
             let entry_cnt_base = (pages - remaining_front).div_floor(multiplier);
-            // [..0000..] calculate the number of chunks until a full top level entry is reached
-            let entries_remaining_front = usize::BITS as usize - ((offset + remaining_front) / multiplier) % usize::BITS as usize; // FIXME: this assumes a size of at least usize::BITS
-            let top_entry_cnt = (entry_cnt_base - entries_remaining_front).div_floor(usize::BITS);
-            let remaining_back_all = pages - top_entry_cnt * multiplier - remaining_front;
-            let entries_remaining_back = remaining_back_all.div_floor(multiplier);
-            let remaining_back = remaining_back_all % multiplier;
+
+            let remaining_back = (pages - remaining_front) % (multiplier * usize::BITS as usize);
+            let remaining_entries_back = remaining_back.div_floor(multiplier);
+            
+            let top_entry_cnt = (entry_cnt_base - remaining_entries_front).div_floor(usize::BITS);
             let entry = offset.div_ceil(multiplier);
             let off = if FROM_LEFT {
                 entry
@@ -350,18 +352,14 @@ impl Layer for GenericLayer {
             };
             let top_bitset = build_bit_mask(top_off, top_entry_cnt);
 
-            (off, entries_remaining_front, entries_remaining_back, remaining_front, remaining_back, top_bitset)
+            (off, remaining_entries_front, remaining_entries_back, remaining_front, remaining_back, top_bitset)
         };
 
         let (entry_any, bitset_entry_front_any, bitset_entry_back_any, bitset_top_any) = {
             // FIXME: finish this up!
-            // say we have chunks of size 4 and top chunks of size 8 and all the 0 should be replaced with 1
-            // [1100000000000000]
-            // [..00..] first calculate the remaining front part (2 would be the amount of that in this case)
-            let remaining_front = multiplier - offset % multiplier;
-            // calculate how many full entries (that should be freed) will follow the front part
+            // calculate how many partial(or full) entries (that should be freed) will follow the front part
             let entry_cnt_base = (pages - remaining_front).div_ceil(multiplier);
-            // [..0000..] calculate the number of chunks until a full top level entry is reached
+            // [110000..] calculate the number of chunks until a full top level entry is reached
             let entries_remaining_front = usize::BITS as usize - ((offset + remaining_front) / multiplier) % usize::BITS as usize; // FIXME: this assumes a size of at least usize::BITS
             let top_entry_cnt = (entry_cnt_base - entries_remaining_front).div_ceil(usize::BITS);
             let remaining_back_all = pages - top_entry_cnt * multiplier - remaining_front;
