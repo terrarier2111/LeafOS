@@ -315,29 +315,38 @@ impl FinalLayer {
 
 pub trait Layer {
 
-    fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool, const FINAL_LAYER: bool>(&self, base: *mut (), offset: usize, pages: usize);
+    fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool>(&self, base: *mut (), offset: usize, pages: usize);
+
+    fn is_final(&self) -> bool;
+
+    fn get_multiplier(&self) -> usize;
 
 }
 
 impl Layer for GenericLayer {
-    fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool, const FINAL_LAYER: bool>(&self, base: *mut (), offset: usize, pages: usize) {
-        let multiplier = LAYER_MULTIPLIERS[self.info.id()];
+    fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool>(&self, base: *mut (), offset: usize, pages: usize) {
+        let multiplier = self.get_multiplier();
 
         let (entry_all, bitset_entry_front_all, bitset_entry_back_all, remaining_front, remaining_back, bitset_top_all) = {
             // say we have chunks of size 4 and top chunks of size 8 and all the 0 should be replaced with 1
             // [1100000000000000]
             // [..00..] first calculate the remaining front part (2 would be the amount of that in this case)
             let remaining_front = multiplier - offset % multiplier;
-            // [110000..] calculate the number of chunks until a full top level entry is reached
+            // [....0000..] calculate the number of chunks until a full top level entry is reached (1 would be the amount in this case)
             let remaining_entries_front = (multiplier * usize::BITS as usize) - (offset + remaining_front) % (multiplier * usize::BITS as usize);
 
             // calculate how many full entries (that should be freed) will follow the front part
             let entry_cnt_base = (pages - remaining_front).div_floor(multiplier);
-
-            let remaining_back = (pages - remaining_front) % (multiplier * usize::BITS as usize);
-            let remaining_entries_back = remaining_back.div_floor(multiplier);
-            
+            // calculate how many top entries there actually are (in between the front and back parts)
             let top_entry_cnt = (entry_cnt_base - remaining_entries_front).div_floor(usize::BITS);
+
+            // [...00000001..] calculate the whole remaining back part (12 would be the amount in this case)
+            let remaining = pages - remaining_front - remaining_entries_front * multiplier - top_entry_cnt * multiplier * usize::BITS as usize;
+            // [...........00001] calculate the remaining back part (4 would be the amount in this case)
+            let remaining_back = remaining % multiplier;
+            // [...0000.....] calculate the remaining back entries (1 would be the amount in this case)
+            let remaining_entries_back = remaining / multiplier;
+            
             let entry = offset.div_ceil(multiplier);
             let off = if FROM_LEFT {
                 entry
@@ -427,6 +436,16 @@ impl Layer for GenericLayer {
                 self.any_free_top_lookup.fetch_or(top_set_any, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
             }
         }
+    }
+
+    #[inline]
+    fn is_final(&self) -> bool {
+        false
+    }
+
+    #[inline]
+    fn get_multiplier(&self) -> usize {
+        LAYER_MULTIPLIERS[self.info.id()]
     }
 }
 
