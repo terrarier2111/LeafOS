@@ -51,7 +51,7 @@
 
 use core::{sync::atomic::{AtomicUsize, Ordering}, ptr::{NonNull, null_mut}};
 
-use crate::{sc_cell::SCCell, util::{build_bit_mask, SyncPtrMut}};
+use crate::{sc_cell::SCCell, util::{build_bit_mask, SyncPtrMut, greater_zero_ret_one}};
 
 pub struct FrameAllocator {
     used_pages: AtomicUsize,
@@ -326,14 +326,15 @@ pub trait Layer {
 impl Layer for GenericLayer {
     fn free_layer<const FROM_LEFT: bool, const CLEAR_OTHER: bool>(&self, base: *mut (), offset: usize, pages: usize) {
         let multiplier = self.get_multiplier();
+        let top_multiplier = multiplier * usize::BITS as usize;
 
         let (entry_all, bitset_entry_front_all, bitset_entry_back_all, remaining_front, remaining_back, bitset_top_all) = {
             // say we have chunks of size 4 and top chunks of size 8 and all the 0 should be replaced with 1
             // [1100000000000000]
             // [..00..] first calculate the remaining front part (2 would be the amount of that in this case)
-            let remaining_front = multiplier - offset % multiplier;
+            let remaining_front = (multiplier - offset % multiplier) % multiplier;
             // [....0000..] calculate the number of chunks until a full top level entry is reached (1 would be the amount in this case)
-            let remaining_entries_front = (multiplier * usize::BITS as usize) - (offset + remaining_front) % (multiplier * usize::BITS as usize);
+            let remaining_entries_front = top_multiplier - (offset + remaining_front) % top_multiplier;
 
             // calculate how many full entries (that should be freed) will follow the front part
             let entry_cnt_base = (pages - remaining_front).div_floor(multiplier);
@@ -341,7 +342,7 @@ impl Layer for GenericLayer {
             let top_entry_cnt = (entry_cnt_base - remaining_entries_front).div_floor(usize::BITS);
 
             // [...00000001..] calculate the whole remaining back part (12 would be the amount in this case)
-            let remaining = pages - remaining_front - remaining_entries_front * multiplier - top_entry_cnt * multiplier * usize::BITS as usize;
+            let remaining = pages - remaining_front - remaining_entries_front * multiplier - top_entry_cnt * top_multiplier;
             // [...........00001] calculate the remaining back part (4 would be the amount in this case)
             let remaining_back = remaining % multiplier;
             // [...0000.....] calculate the remaining back entries (1 would be the amount in this case)
@@ -366,19 +367,21 @@ impl Layer for GenericLayer {
 
         let (entry_any, bitset_entry_front_any, bitset_entry_back_any, bitset_top_any) = {
             // FIXME: finish this up!
+            let remaining_front_all = (top_multiplier - offset % top_multiplier) % top_multiplier;
+            let remaining_front_pages = remaining_front_all.div_ceil(multiplier);
+            let remaining_front_rest = remaining_front_all - (remaining_front_all.div_floor(multiplier) * multiplier);
             // calculate how many partial(or full) entries (that should be freed) will follow the front part
-            let entry_cnt_base = (pages - remaining_front).div_ceil(multiplier);
-            // [110000..] calculate the number of chunks until a full top level entry is reached
-            let entries_remaining_front = usize::BITS as usize - ((offset + remaining_front) / multiplier) % usize::BITS as usize; // FIXME: this assumes a size of at least usize::BITS
-            let top_entry_cnt = (entry_cnt_base - entries_remaining_front).div_ceil(usize::BITS);
-            let remaining_back_all = pages - top_entry_cnt * multiplier - remaining_front;
-            let entries_remaining_back = remaining_back_all.div_floor(multiplier);
+            let entry_cnt_base = (pages - remaining_front_rest).div_floor(multiplier);
+            let top_entry_cnt = (entry_cnt_base - entries_remaining_front).div_floor(usize::BITS);
+            let remaining_back_all = pages - remaining_front_all - top_entry_cnt * top_multiplier;
+            let entries_remaining_back = remaining_back_all.div_ceil(multiplier);
             let entry = offset.div_floor(multiplier);
             let off = if FROM_LEFT {
                 entry
             } else {
                 ENTRIES_PER_INDIRECTION - 1 - entry
             };
+            let top_entry_cnt = top_entry_cnt + greater_zero_ret_one(remaining_front_all) + greater_zero_ret_one(remaining_back_all);
             // we have to offset this as the entry is not the actual offset we want becasue of directionality
             let top_off = if FROM_LEFT {
                 entry
