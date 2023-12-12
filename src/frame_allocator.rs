@@ -392,31 +392,17 @@ impl Layer for GenericLayer {
 
             (off, entries_remaining_front, entries_remaining_back, top_bitset)
         };
-
-        let entry = if FROM_LEFT { offset.div_floor(multiplier) } else { offset.div_ceil(multiplier) };
-        let entry_cnt_base_all = pages.div_floor(multiplier);
-        let top_entry_cnt_all = entry_cnt_base_all.div_floor(usize::BITS);
-        let entry_cnt_all = entry_cnt_base_all - top_entry_cnt_all * usize::BITS as usize;
-    
-        let off = if FROM_LEFT {
-            entry
-        } else {
-            ENTRIES_PER_INDIRECTION - entry
-        };
-        let bitset = build_bit_mask(if FROM_LEFT {
-            0
-        } else {
-            usize::BITS - entry_cnt_all
-        }, entry_cnt_all);
         
+        // FIXME: free up remaining entries!
+
         if CLEAR_OTHER {
-            self.any_free[entry].store(bitset, Ordering::Release);
-            self.all_free[entry].store(bitset, Ordering::Release);
+            self.any_free[entry_any].store(bitset_top_any, Ordering::Release);
+            self.all_free[entry_all].store(bitset_top_all, Ordering::Release);
         } else {
-            self.any_free[entry].fetch_or(bitset, Ordering::AcqRel);
-            self.all_free[entry].fetch_or(bitset, Ordering::AcqRel);
+            self.any_free[entry_any].fetch_or(bitset_top_any, Ordering::AcqRel);
+            self.all_free[entry_all].fetch_or(bitset_top_all, Ordering::AcqRel);
         }
-        let remaining = pages - entry_cnt_base_all * multiplier;
+        let remaining = remaining_back;
         if remaining != 0 {
             let sub_ptr = unsafe { base.byte_add(entry_cnt_base_all * multiplier) };
             let addr = LAYER_START_ADDRS[self.info.id() + 1].get().0;
@@ -426,17 +412,6 @@ impl Layer for GenericLayer {
             } else {
                 let final = unsafe { &*addr.cast::<FinalLayer>() };
                 // FIXME: free
-            }
-        }
-        if top_entry_cnt > 0 {
-            let top_set_all = build_bit_mask(entry, top_entry_cnt_all);
-            let top_set_any = build_bit_mask(entry, top_entry_cnt_any);
-            if CLEAR_OTHER {
-                self.all_free_top_lookup.store(top_set_all, Ordering::AcqRel);
-                self.any_free_top_lookup.store(top_set_any, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
-            } else {
-                self.all_free_top_lookup.fetch_or(top_set_all, Ordering::AcqRel);
-                self.any_free_top_lookup.fetch_or(top_set_any, Ordering::AcqRel); // FIXME: free one more bit than for the all case!
             }
         }
     }
