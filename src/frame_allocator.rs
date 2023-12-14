@@ -348,7 +348,7 @@ impl Layer for GenericLayer {
             // [...0000.....] calculate the remaining back entries (1 would be the amount in this case)
             let remaining_entries_back = remaining / multiplier;
             
-            let entry = offset.div_ceil(multiplier);
+            let entry = offset.div_floor(multiplier);
             let off = if FROM_LEFT {
                 entry
             } else {
@@ -396,14 +396,21 @@ impl Layer for GenericLayer {
         // FIXME: free up remaining entries!
 
         if CLEAR_OTHER {
-            self.any_free[entry_any].store(bitset_top_any, Ordering::Release);
-            self.all_free[entry_all].store(bitset_top_all, Ordering::Release);
+            self.any_free[entry_any].store(bitset_entry_front_any, Ordering::Release);
+            self.all_free[entry_all].store(bitset_entry_front_all, Ordering::Release);
+            self.any_free[entry_any + bitset_entry_front_any.count_ones() as usize + usize::BITS as usize * bitset_top_any.count_ones() as usize].store(bitset_entry_back_any, Ordering::Release);
+            self.all_free[entry_all + bitset_entry_front_all.count_ones() as usize + usize::BITS as usize * bitset_top_all.count_ones() as usize].store(bitset_entry_back_all, Ordering::Release);
+            self.any_free_top_lookup.store(bitset_top_any, Ordering::Release);
+            self.all_free_top_lookup.store(bitset_top_all, Ordering::Release);
         } else {
-            self.any_free[entry_any].fetch_or(bitset_top_any, Ordering::AcqRel);
-            self.all_free[entry_all].fetch_or(bitset_top_all, Ordering::AcqRel);
+            self.any_free[entry_any].fetch_or(bitset_entry_front_any, Ordering::AcqRel);
+            self.all_free[entry_all].fetch_or(bitset_entry_front_all, Ordering::AcqRel);
+            self.any_free[entry_any + bitset_entry_front_any.count_ones() as usize + usize::BITS as usize * bitset_top_any.count_ones() as usize].fetch_or(bitset_entry_back_any, Ordering::AcqRel);
+            self.all_free[entry_all + bitset_entry_front_all.count_ones() as usize + usize::BITS as usize * bitset_top_all.count_ones() as usize].fetch_or(bitset_entry_back_all, Ordering::AcqRel);
+            self.any_free_top_lookup.fetch_or(bitset_top_any, Ordering::AcqRel);
+            self.all_free_top_lookup.fetch_or(bitset_top_all, Ordering::AcqRel);
         }
-        let remaining = remaining_back;
-        if remaining != 0 {
+        if remaining_back != 0 {
             let sub_ptr = unsafe { base.byte_add(entry_cnt_base_all * multiplier) };
             let addr = LAYER_START_ADDRS[self.info.id() + 1].get().0;
             if self.info.id() < 2 {
