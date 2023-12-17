@@ -411,10 +411,10 @@ impl Layer for GenericLayer {
             self.all_free_top_lookup.fetch_or(bitset_top_all, Ordering::AcqRel);
         }
         if remaining_back != 0 {
-            let sub_ptr = unsafe { base.byte_add(entry_cnt_base_all * multiplier) };
+            let sub_ptr = unsafe { base.byte_add(entry_all * multiplier + bitset_top_all.count_ones() * top_multiplier + bitset_entry_back_all * multiplier) };
             let addr = LAYER_START_ADDRS[self.info.id() + 1].get().0;
             if self.info.id() < 2 {
-                let lower = unsafe { &*addr.cast::<Layer> };
+                let lower = unsafe { &*addr.cast::<GenericLayer> }; // FIXME: somehow choose the correct layer (that of our sub_ptr)
                 lower.free_at::<FROM_LEFT, CLEAR_OTHER>(sub_ptr, 0, remaining);
             } else {
                 let final = unsafe { &*addr.cast::<FinalLayer>() };
